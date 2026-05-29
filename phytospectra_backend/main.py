@@ -1,0 +1,45 @@
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from core.config import settings
+from core.watcher import start_watcher
+from routers import websocket, flights, detections, health, analyze
+from routers import uploads, fields, drones, images
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    watcher_task = asyncio.create_task(start_watcher())
+    yield
+    watcher_task.cancel()
+
+app = FastAPI(
+    title="CropSense API",
+    description="Real-time crop stress monitoring backend",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(websocket.router)
+app.include_router(detections.router, prefix="/api/detections")
+app.include_router(health.router,     prefix="/api")
+app.include_router(fields.router,     prefix="/api")
+app.include_router(flights.router,    prefix="/api")
+app.include_router(uploads.router,    prefix="/api")
+app.include_router(drones.router,     prefix="/api")
+app.include_router(analyze.router,    prefix="/api")
+app.include_router(images.router,     prefix="/api")
