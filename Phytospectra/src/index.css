@@ -1,0 +1,176 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
+All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    /* Phytospectra design system — light, fresh agriculture SaaS */
+    --background: 120 40% 97%;            /* #f4faf4 mint */
+    --foreground: 158 40% 12%;
+
+    --card: 156 60% 98%;                  /* #f8fffc */
+    --card-foreground: 158 40% 12%;
+
+    --surface: 0 0% 100%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 158 40% 12%;
+
+    --primary: 142 71% 37%;               /* #16a34a vibrant green */
+    --primary-foreground: 0 0% 100%;
+    --primary-glow: 142 76% 50%;
+
+    --secondary: 199 89% 48%;             /* #0ea5e9 sky */
+    --secondary-foreground: 0 0% 100%;
+
+    --accent-amber: 38 92% 50%;           /* #f59e0b */
+    --accent-amber-foreground: 0 0% 100%;
+
+    --muted: 150 30% 94%;
+    --muted-foreground: 158 15% 40%;
+
+    --accent: 150 30% 94%;
+    --accent-foreground: 158 40% 18%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 150 25% 88%;
+    --input: 150 25% 88%;
+    --ring: 142 71% 37%;
+
+    --radius: 1rem;
+
+    /* Stress scale */
+    --stress-healthy: 142 71% 45%;        /* #22c55e */
+    --stress-mild: 48 96% 53%;            /* #eab308 */
+    --stress-moderate: 25 95% 53%;        /* #f97316 */
+    --stress-severe: 0 84% 60%;           /* #ef4444 */
+
+    /* Sidebar — deep forest */
+    --sidebar: 152 39% 17%;               /* #1a3c2e */
+    --sidebar-foreground: 0 0% 100%;
+    --sidebar-accent: 152 35% 25%;
+    --sidebar-accent-foreground: 0 0% 100%;
+    --sidebar-border: 152 30% 22%;
+    --sidebar-ring: 142 71% 50%;
+
+    /* Gradients */
+    --gradient-live: linear-gradient(135deg, hsl(142 71% 37%), hsl(173 80% 36%));
+    --gradient-analytics: linear-gradient(135deg, hsl(258 90% 66%), hsl(199 89% 48%));
+    --gradient-gallery: linear-gradient(135deg, hsl(173 80% 36%), hsl(142 71% 37%));
+    --gradient-expert: linear-gradient(135deg, hsl(38 92% 50%), hsl(20 95% 55%));
+    --gradient-card: linear-gradient(135deg, hsl(0 0% 100%), hsl(150 50% 98%));
+
+    /* Shadows */
+    --shadow-soft: 0 4px 20px -4px hsl(152 39% 17% / 0.08);
+    --shadow-card: 0 8px 30px -8px hsl(142 50% 30% / 0.15);
+    --shadow-glow: 0 0 40px hsl(142 71% 50% / 0.35);
+
+    --transition-smooth: all 300ms cubic-bezier(0.4, 0, 0.2, 1);
+
+    --sidebar-background: var(--sidebar);
+    --sidebar-primary: 142 71% 45%;
+    --sidebar-primary-foreground: 0 0% 100%;
+  }
+
+  .dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 222.2 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 210 40% 98%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 212.7 26.8% 83.9%;
+    --sidebar-background: 240 5.9% 10%;
+    --sidebar-foreground: 240 4.8% 95.9%;
+    --sidebar-primary: 224.3 76.3% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 240 3.7% 15.9%;
+    --sidebar-accent-foreground: 240 4.8% 95.9%;
+    --sidebar-border: 240 3.7% 15.9%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+  }
+
+  h1, h2, h3, h4, h5, h6, .font-display {
+    font-family: 'Clash Display', 'Plus Jakarta Sans', sans-serif;
+    letter-spacing: -0.01em;
+  }
+}
+
+@layer utilities {
+  .gradient-live { background: var(--gradient-live); }
+  .gradient-analytics { background: var(--gradient-analytics); }
+  .gradient-gallery { background: var(--gradient-gallery); }
+  .gradient-expert { background: var(--gradient-expert); }
+  .gradient-card { background: var(--gradient-card); }
+  .shadow-soft { box-shadow: var(--shadow-soft); }
+  .shadow-card { box-shadow: var(--shadow-card); }
+  .shadow-glow { box-shadow: var(--shadow-glow); }
+  .transition-smooth { transition: var(--transition-smooth); }
+}
+
+@keyframes pulse-live {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.6; transform: scale(1.15); }
+}
+@keyframes float-leaf {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  50% { transform: translateY(-12px) rotate(8deg); }
+}
+@keyframes slide-in-right {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+@keyframes fade-slide-down {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes grow-plant {
+  0% { transform: scale(0.7) rotate(-5deg); }
+  50% { transform: scale(1.1) rotate(5deg); }
+  100% { transform: scale(0.7) rotate(-5deg); }
+}
+
+.animate-pulse-live { animation: pulse-live 1.6s ease-in-out infinite; }
+.animate-float-leaf { animation: float-leaf 6s ease-in-out infinite; }
+.animate-slide-in-right { animation: slide-in-right 300ms cubic-bezier(0.4, 0, 0.2, 1); }
+.animate-fade-slide-down { animation: fade-slide-down 400ms ease-out; }
+.animate-grow-plant { animation: grow-plant 1.4s ease-in-out infinite; }
+
+.leaflet-container { background: hsl(var(--muted)); font-family: inherit; }
