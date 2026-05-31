@@ -1,14 +1,15 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect, useCallback } from "react";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
 
 import { PageHeader } from "@/components/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
 
-import { AlertTriangle, Image as ImageIcon, UploadCloud } from "lucide-react";
-import { uploadRawMultispectralImage } from "@/lib/uploadRawMultispectral";
+import { AlertTriangle, Image as ImageIcon, UploadCloud, MapPin } from "lucide-react";
 import { getBackendBaseUrl } from "@/lib/backend";
+import { Field } from "@/types/backend";
 
 type ClassifyResponse = {
   zone_id: string;
@@ -29,6 +30,14 @@ function classLabelToSeverity(label: string) {
   return { tone: "green", title: "Healthy" };
 }
 
+function getTokenFromSession() {
+  return supabase.auth.getSession().then(({ data }) => {
+    const token = data.session?.access_token;
+    if (!token) throw new Error("Missing session access token");
+    return token;
+  });
+}
+
 export default function FarmerAnalyze() {
   const { role, loading, user } = useAuth() as {
     role: string;
@@ -36,11 +45,16 @@ export default function FarmerAnalyze() {
     user: { id: string } | null;
   };
 
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [processing, setProcessing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<ClassifyResponse | null>(null);
+  const [selectedFile, setSelectedFile]     = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl]         = useState<string | null>(null);
+  const [processing, setProcessing]         = useState(false);
+  const [error, setError]                   = useState<string | null>(null);
+  const [result, setResult]                 = useState<ClassifyResponse | null>(null);
+
+  // ── Fields ────────────────────────────────────────────────────────────
+  const [fields, setFields]                 = useState<Field[]>([]);
+  const [selectedFieldId, setSelectedFieldId] = useState<string>("");
+  const [fieldsLoading, setFieldsLoading]   = useState(false);
 
   const canShow = !loading && role === "farmer";
 
@@ -49,106 +63,111 @@ export default function FarmerAnalyze() {
     return classLabelToSeverity(result.stress_class);
   }, [result]);
 
+  // ── Fetch fields ──────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!canShow) return;
+    let active = true;
+
+    const run = async () => {
+      setFieldsLoading(true);
+      try {
+        const token = await getTokenFromSession();
+        const res = await fetch(`${getBackendBaseUrl()}/api/fields`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const data = (await res.json()) as Field[];
+        if (!active) return;
+        setFields(data);
+        if (data.length > 0) setSelectedFieldId(data[0].id);
+      } catch (e) {
+        console.error("Fields fetch error:", e);
+      } finally {
+        if (active) setFieldsLoading(false);
+      }
+    };
+
+    run();
+    return () => { active = false; };
+  }, [canShow]);
+
   if (!canShow) return null;
 
   const onPickFile = (f: File | null) => {
     setError(null);
     setResult(null);
-    if (!f) {
-      setSelectedFile(null);
-      setPreviewUrl(null);
-      return;
-    }
+    if (!f) { setSelectedFile(null); setPreviewUrl(null); return; }
     setSelectedFile(f);
     setPreviewUrl(URL.createObjectURL(f));
   };
 
   const analyze = async () => {
     if (!selectedFile) return;
+    if (!selectedFieldId) {
+      setError("Please select a field before running analysis.");
+      return;
+    }
 
     setProcessing(true);
     setError(null);
     setResult(null);
 
     try {
-      // Validate file type
-      if (!selectedFile.type) {
-        setError("File type is missing. Please upload a valid multispectral image file.");
-        return;
-      }
+      if (!user?.id) { setError("User not found. Please sign in again."); return; }
 
-      // Validate user
-      if (!user?.id) {
-        setError("User not found. Please sign in again.");
-        return;
-      }
+      const token = await getTokenFromSession();
 
-      // Validate session and get access token for backend
-      const { data: sessionData } = await supabase.auth.getSession();
-      const accessToken = sessionData.session?.access_token;
+      if (!window.confirm("Upload this image and run analysis?")) return;
 
-      if (!accessToken) {
-        setError("Session expired. Please sign in again.");
-        return;
-      }
+      const backendBaseUrl = getBackendBaseUrl();
 
-      if (!window.confirm("Upload this image to Supabase Storage and run manual analysis?")) {
-        return;
-      }
+      // ── Step 1: Upload via FastAPI ──────────────────────────────────
+      const formData = new FormData();
+      formData.append("file", selectedFile);
+      formData.append("field_id", selectedFieldId);
 
-      const userId = user.id;
-      const fieldId = "default-field";
-      const flightId = "manual-camera";
-      const bucket = "multispectral";
-
-      // 1) Upload to Supabase Storage
-      await uploadRawMultispectralImage({
-        file: selectedFile,
-        userId,
-        fieldId,
-        flightId,
-        bucket,
+      const uploadRes = await fetch(`${backendBaseUrl}/api/upload`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
       });
 
-      // 2) Build the object path using the same sanitization as the upload util
-      const sanitize = (s: string) =>
-        s.replace(/\\/g, "_").replace(/\//g, "_").replace(/%/g, "_%");
+      if (!uploadRes.ok) {
+        const text = await uploadRes.text();
+        throw new Error(`Upload failed (${uploadRes.status}): ${text}`);
+      }
 
-      const objectPath = [
-        sanitize(userId),
-        sanitize(fieldId),
-        sanitize(flightId),
-        sanitize(selectedFile.name || ""),
-      ].join("/");
+      const uploadData = await uploadRes.json();
 
-      // 3) Call FastAPI — pass JWT as Bearer token
-      const backendBaseUrl = getBackendBaseUrl();
-      const res = await fetch(`${backendBaseUrl}/api/analyze/from-storage`, {
+      // ── Step 2: Analyze from storage ───────────────────────────────
+      const analyzeRes = await fetch(`${backendBaseUrl}/api/analyze/from-storage`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${accessToken}`,
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          bucket,
-          object_path: objectPath,
+          bucket: uploadData.bucket,
+          object_path: uploadData.storage_path,
           flight_id: null,
         }),
       });
 
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`Analysis failed (${res.status}): ${text}`);
+      if (!analyzeRes.ok) {
+        const text = await analyzeRes.text();
+        throw new Error(`Analysis failed (${analyzeRes.status}): ${text}`);
       }
 
-      const data = (await res.json()) as ClassifyResponse;
-      setResult(data);
+      setResult((await analyzeRes.json()) as ClassifyResponse);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to analyze image");
     } finally {
       setProcessing(false);
     }
   };
+
+  const selectedField = fields.find((f) => f.id === selectedFieldId);
+  const canAnalyze = !!selectedFile && !!selectedFieldId && !processing;
 
   return (
     <div className="space-y-4">
@@ -164,31 +183,64 @@ export default function FarmerAnalyze() {
       </PageHeader>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* Left panel — upload controls */}
+        {/* Left panel */}
         <Card className="p-5 lg:col-span-1 space-y-4">
-          <div>
-            <div className="font-semibold mb-2 flex items-center gap-2">
+
+          {/* Field selector — same design as Flights page */}
+          <div className="space-y-2">
+            <Label className="flex items-center gap-2">
+              <MapPin className="h-4 w-4" />
+              Select field
+            </Label>
+            {fieldsLoading ? (
+              <div className="text-xs text-muted-foreground animate-pulse">Loading fields…</div>
+            ) : fields.length === 0 ? (
+              <div className="text-xs text-amber-500">
+                No fields found. Please create a field first.
+              </div>
+            ) : (
+              <select
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring"
+                value={selectedFieldId}
+                onChange={(e) => setSelectedFieldId(e.target.value)}
+                disabled={processing}
+              >
+                <option value="">— Select a field —</option>
+                {fields.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.field_name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+
+          {/* File picker */}
+          <div className="space-y-2">
+            <Label className="flex items-center gap-2">
               <ImageIcon className="h-4 w-4" />
               Upload image
-            </div>
-            <label className="sr-only" htmlFor="multispectral-upload">
-              Upload multispectral image
-            </label>
+            </Label>
             <input
               id="multispectral-upload"
               type="file"
               accept=".tif,.tiff,.png,.jpg,.jpeg"
-              className="w-full"
+              className="w-full text-sm"
               onChange={(e) => onPickFile(e.target.files?.[0] ?? null)}
               disabled={processing}
             />
           </div>
 
-          <Button
-            onClick={analyze}
-            className="w-full"
-            disabled={!selectedFile || processing}
-          >
+          {/* Summary card */}
+          {selectedFile && selectedFieldId && (
+            <div className="rounded-xl border border-border/40 bg-muted/40 px-3 py-2 text-xs text-muted-foreground space-y-1">
+              <div><span className="font-medium text-foreground">Field:</span> {selectedField?.field_name}</div>
+              <div><span className="font-medium text-foreground">File:</span> {selectedFile.name}</div>
+              <div><span className="font-medium text-foreground">Size:</span> {(selectedFile.size / 1024).toFixed(1)} KB</div>
+            </div>
+          )}
+
+          <Button onClick={analyze} className="w-full" disabled={!canAnalyze}>
             {processing ? "Processing…" : "Run AI classification"}
           </Button>
 
@@ -205,17 +257,13 @@ export default function FarmerAnalyze() {
           </div>
         </Card>
 
-        {/* Right panel — preview + results */}
+        {/* Right panel */}
         <div className="lg:col-span-2 space-y-4">
           <Card className="p-5 space-y-3">
             <h3 className="font-display font-semibold">Preview</h3>
             {previewUrl ? (
               <div className="rounded-xl border border-border/40 bg-muted overflow-hidden">
-                <img
-                  src={previewUrl}
-                  alt="Selected"
-                  className="w-full max-h-[420px] object-contain"
-                />
+                <img src={previewUrl} alt="Selected" className="w-full max-h-[420px] object-contain" />
               </div>
             ) : (
               <div className="h-[220px] rounded-xl border border-dashed border-border/50 bg-muted/40 flex items-center justify-center text-xs text-muted-foreground">
@@ -226,14 +274,12 @@ export default function FarmerAnalyze() {
 
           <Card className="p-5 space-y-3">
             <h3 className="font-display font-semibold">Result</h3>
-
             {!result ? (
               <div className="text-sm text-muted-foreground">
                 Run classification to see stress label and confidence.
               </div>
             ) : (
               <div className="space-y-4">
-                {/* Metrics row */}
                 <div className="flex flex-wrap items-center gap-3">
                   <div className="rounded-2xl border border-border/40 bg-card px-4 py-3">
                     <div className="text-xs text-muted-foreground">Stress class</div>
@@ -241,15 +287,11 @@ export default function FarmerAnalyze() {
                   </div>
                   <div className="rounded-2xl border border-border/40 bg-card px-4 py-3">
                     <div className="text-xs text-muted-foreground">Confidence</div>
-                    <div className="font-bold">
-                      {Math.round(result.confidence * 100)}%
-                    </div>
+                    <div className="font-bold">{Math.round(result.confidence * 100)}%</div>
                   </div>
                   <div className="rounded-2xl border border-border/40 bg-card px-4 py-3">
                     <div className="text-xs text-muted-foreground">Health score</div>
-                    <div className="font-bold">
-                      {Math.round(result.health_score)}/100
-                    </div>
+                    <div className="font-bold">{Math.round(result.health_score)}/100</div>
                   </div>
                   {severity && (
                     <div className="rounded-2xl border border-border/40 bg-card px-4 py-3">
@@ -259,23 +301,17 @@ export default function FarmerAnalyze() {
                   )}
                 </div>
 
-                {/* GPS */}
                 {result.gps && (
                   <div className="text-xs text-muted-foreground">
                     GPS: {result.gps.lat.toFixed(6)}, {result.gps.lng.toFixed(6)}
                   </div>
                 )}
 
-                {/* Images */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   <div>
                     <div className="text-xs text-muted-foreground mb-2">Heatmap</div>
                     {result.heatmap_url ? (
-                      <img
-                        src={result.heatmap_url}
-                        alt="Heatmap"
-                        className="w-full rounded-xl border border-border/40"
-                      />
+                      <img src={result.heatmap_url} alt="Heatmap" className="w-full rounded-xl border border-border/40" />
                     ) : (
                       <div className="h-[180px] rounded-xl border border-dashed border-border/50 bg-muted/40 flex items-center justify-center text-xs text-muted-foreground">
                         No heatmap available.
@@ -285,11 +321,7 @@ export default function FarmerAnalyze() {
                   <div>
                     <div className="text-xs text-muted-foreground mb-2">Drone image</div>
                     {result.drone_image_url ? (
-                      <img
-                        src={result.drone_image_url}
-                        alt="Drone"
-                        className="w-full rounded-xl border border-border/40"
-                      />
+                      <img src={result.drone_image_url} alt="Drone" className="w-full rounded-xl border border-border/40" />
                     ) : (
                       <div className="h-[180px] rounded-xl border border-dashed border-border/50 bg-muted/40 flex items-center justify-center text-xs text-muted-foreground">
                         No drone image available.

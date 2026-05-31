@@ -265,7 +265,7 @@ export default function Fields() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="🌾 Fields"
+        title=" Fields"
         subtitle="Create and manage your farm fields"
         gradient="gradient-gallery"
       />

@@ -40,39 +40,45 @@ async def upload_image(
     contents = await file.read()
     client   = get_supabase()
 
+    # ── Upload to Supabase Storage ────────────────────────────────────────
     try:
         client.storage.from_(settings.SUPABASE_BUCKET_RAW).upload(
             storage_path, contents,
             file_options={"content-type": MIME_TYPES[ext]}
         )
     except Exception as e:
-        logger.error(f"Storage upload failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Storage upload failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Storage upload failed: {str(e)}")
 
-    # Save temp file to extract EXIF GPS (Windows-safe path)
-    import tempfile
+    # ── Extract GPS from EXIF ─────────────────────────────────────────────
+    gps = None
     tmp_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4().hex}{ext}")
-    
-    with open(tmp_path, "wb") as f:
-        f.write(contents)
-
     try:
+        with open(tmp_path, "wb") as f:
+            f.write(contents)
         gps = extract_gps_from_exif(tmp_path)
+    except Exception as e:
+        logger.warning(f"GPS extraction failed (non-fatal): {e}")
+        # Don't crash — GPS is optional for manual uploads
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
-    # Save to images table
-    await save_image({
-        "user_id":       user_id,
-        "field_id":      field_id,
-        "flight_id":     flight_id,
-        "drone_id":      drone_id,
-        "storage_path":  storage_path,
-        "bucket_name":   settings.SUPABASE_BUCKET_RAW,
-        "gps":           gps,
-        "upload_source": "manual",
-    })
+    # ── Save record to DB ─────────────────────────────────────────────────
+    try:
+        await save_image({
+            "user_id":       user_id,
+            "field_id":      field_id,
+            "flight_id":     flight_id,
+            "drone_id":      drone_id,
+            "storage_path":  storage_path,
+            "bucket_name":   settings.SUPABASE_BUCKET_RAW,
+            "gps":           gps,
+            "upload_source": "manual",
+        })
+    except Exception as e:
+        logger.error(f"DB save failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"DB record failed: {str(e)}")
 
     return {
         "storage_path": storage_path,

@@ -4,6 +4,6 @@ export function getBackendBaseUrl() {
   if (v && v.trim()) return v.trim().replace(/\/$/, "");
 
   // Fallbacks for local dev
-  return "http://192.168.100.8:8000";
+  return "http://10.0.31.38:8000";
 }
 
