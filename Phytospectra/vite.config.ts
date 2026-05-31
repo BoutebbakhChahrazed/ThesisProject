@@ -11,6 +11,14 @@ export default defineConfig(({ mode }) => ({
     hmr: {
       overlay: false,
     },
+    // Same-origin proxy to MAPIR camera — avoids browser CORS on 192.168.1.254
+    proxy: {
+      "/camera-proxy": {
+        target: "http://192.168.1.254",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/camera-proxy/, ""),
+      },
+    },
   },
   plugins: [react(), mode === "development" && componentTagger()].filter(Boolean),
   resolve: {
