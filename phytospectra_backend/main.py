@@ -26,15 +26,22 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=[
+#         "http://10.0.31.38:8080",
+#         "http://localhost:8080",
+#         "http://localhost:5173",
+#         "http://10.0.31.38:5173",
+#     ],
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://10.0.31.38:8080",
-        "http://localhost:8080",
-        "http://localhost:5173",
-        "http://10.0.31.38:5173",
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,  # Must be False when using wildcard origin
     allow_methods=["*"],
     allow_headers=["*"],
 )

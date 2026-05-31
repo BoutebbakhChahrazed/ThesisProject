@@ -2,7 +2,10 @@ import { useState, useEffect, useCallback } from "react";
 import { PageHeader } from "@/components/PageHeader";
 import { supabase } from "@/integrations/supabase/client";
 import { getBackendBaseUrl } from "@/lib/backend";
-import { X, ChevronDown, ChevronRight, ImageOff, Loader2 } from "lucide-react";
+import {
+  X, ChevronDown, ChevronRight, ImageOff, Loader2,
+  Layers, CheckCircle2, AlertCircle, RefreshCw,
+} from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Field, Flight } from "@/types/backend";
 
@@ -20,7 +23,42 @@ type ImageRow = {
   publicUrl?: string;
 };
 
-type SelectedImage = ImageRow & { fieldName: string; flightLabel: string };
+type SegResult = {
+  image_id: string;
+  mask_url: string;
+  label_counts: Record<string, number>;
+  cached?: boolean;
+};
+
+type SegState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "done"; results: SegResult[] }
+  | { status: "error"; message: string };
+
+type SelectedImage = ImageRow & {
+  fieldName: string;
+  flightLabel: string;
+  maskUrl?: string;
+};
+
+// ── Label config ────────────────────────────────────────────────────────────
+
+const LABEL_META: Record<string, { name: string; colour: string }> = {
+  "0": { name: "Vegetation", colour: "#00802b" },
+  "1": { name: "Soil",       colour: "#c2b280" },
+  "2": { name: "Water",      colour: "#0055ff" },
+  "3": { name: "Crop",       colour: "#e6d800" },
+  "4": { name: "Weed",       colour: "#800080" },
+  "5": { name: "Stress",     colour: "#ff8c00" },
+};
+
+function labelName(idx: string) {
+  return LABEL_META[idx]?.name ?? `Class ${idx}`;
+}
+function labelColour(idx: string) {
+  return LABEL_META[idx]?.colour ?? "#888";
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -34,36 +72,124 @@ function getTokenFromSession() {
 
 async function resolveSignedUrls(imgs: ImageRow[]): Promise<ImageRow[]> {
   if (imgs.length === 0) return imgs;
-
   const byBucket: Record<string, ImageRow[]> = {};
   for (const img of imgs) {
     if (!img.storage_path || !img.bucket_name) continue;
     byBucket[img.bucket_name] = byBucket[img.bucket_name] || [];
     byBucket[img.bucket_name].push(img);
   }
-
   const urlMap: Record<string, string> = {};
-
   for (const [bucket, bucketImgs] of Object.entries(byBucket)) {
     const paths = bucketImgs.map((img) => img.storage_path);
     const { data, error } = await supabase.storage
       .from(bucket)
-      .createSignedUrls(paths, 60 * 60); // 1-hour expiry
-
-    if (error) {
-      console.error(`Signed URL error for bucket "${bucket}":`, error);
-      continue;
-    }
-
+      .createSignedUrls(paths, 60 * 60);
+    if (error) { console.error(`Signed URL error for bucket "${bucket}":`, error); continue; }
     for (const entry of data ?? []) {
       if (entry.signedUrl) urlMap[entry.path] = entry.signedUrl;
     }
   }
+  return imgs.map((img) => ({ ...img, publicUrl: urlMap[img.storage_path] }));
+}
 
-  return imgs.map((img) => ({
-    ...img,
-    publicUrl: urlMap[img.storage_path],
-  }));
+// ── LabelBar ────────────────────────────────────────────────────────────────
+
+function LabelBar({ counts }: { counts: Record<string, number> }) {
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  if (total === 0) return null;
+  const sorted = Object.entries(counts).sort(([, a], [, b]) => b - a);
+  return (
+    <div className="mt-2 space-y-1">
+      {/* Stacked bar */}
+      <div className="flex h-2 w-full rounded-full overflow-hidden">
+        {sorted.map(([idx, count]) => (
+          <div
+            key={idx}
+            style={{ width: `${(count / total) * 100}%`, backgroundColor: labelColour(idx) }}
+            title={`${labelName(idx)}: ${((count / total) * 100).toFixed(1)}%`}
+          />
+        ))}
+      </div>
+      {/* Legend */}
+      <div className="flex flex-wrap gap-x-3 gap-y-0.5">
+        {sorted.slice(0, 5).map(([idx, count]) => (
+          <div key={idx} className="flex items-center gap-1 text-[10px] text-muted-foreground">
+            <span
+              className="inline-block w-2 h-2 rounded-sm shrink-0"
+              style={{ backgroundColor: labelColour(idx) }}
+            />
+            {labelName(idx)} {((count / total) * 100).toFixed(1)}%
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── SegButton ────────────────────────────────────────────────────────────────
+
+function SegButton({
+  flightId,
+  seg,
+  onSeg,
+}: {
+  flightId: string;
+  seg: SegState;
+  onSeg: (flightId: string, force?: boolean) => void;
+}) {
+  if (seg.status === "loading") {
+    return (
+      <div className="flex items-center gap-1.5 text-xs text-muted-foreground px-3 py-1.5 rounded-lg bg-muted animate-pulse">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        Running segmentation…
+      </div>
+    );
+  }
+  if (seg.status === "done") {
+    return (
+      <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 text-xs text-emerald-600 font-medium px-3 py-1.5 rounded-lg bg-emerald-50 border border-emerald-200">
+          <CheckCircle2 className="h-3.5 w-3.5" />
+          Segmentation ready
+        </div>
+        <button
+          onClick={() => onSeg(flightId, true)}
+          className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground px-2 py-1.5 rounded-lg hover:bg-muted transition-colors"
+          title="Re-run segmentation"
+        >
+          <RefreshCw className="h-3 w-3" />
+        </button>
+      </div>
+    );
+  }
+  if (seg.status === "error") {
+    return (
+      <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 text-xs text-red-600 px-3 py-1.5 rounded-lg bg-red-50 border border-red-200">
+          <AlertCircle className="h-3.5 w-3.5" />
+          {seg.message}
+        </div>
+        <button
+          onClick={() => onSeg(flightId)}
+          className="text-xs text-muted-foreground underline hover:text-foreground"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+  // idle
+  return (
+    <button
+      onClick={() => onSeg(flightId)}
+      className="flex items-center gap-1.5 text-xs font-medium text-white px-3 py-1.5 rounded-lg
+                 bg-gradient-to-r from-emerald-600 to-green-500 hover:from-emerald-700 hover:to-green-600
+                 shadow-sm hover:shadow transition-all"
+    >
+      <Layers className="h-3.5 w-3.5" />
+      Run Segmentation
+    </button>
+  );
 }
 
 // ── Section (collapsible) ──────────────────────────────────────────────────
@@ -73,30 +199,35 @@ function Section({
   subtitle,
   count,
   defaultOpen = false,
+  headerExtra,
   children,
 }: {
   title: string;
   subtitle?: string;
   count: number;
   defaultOpen?: boolean;
+  headerExtra?: React.ReactNode;
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
     <div className="space-y-3">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center gap-2 text-left"
-      >
-        {open
-          ? <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
-          : <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />}
-        <span className="font-semibold">{title}</span>
-        {subtitle && <span className="text-xs text-muted-foreground">{subtitle}</span>}
-        <span className="ml-auto text-xs text-muted-foreground shrink-0">
-          {count} image{count !== 1 ? "s" : ""}
-        </span>
-      </button>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className="flex items-center gap-2 text-left flex-1 min-w-0"
+        >
+          {open
+            ? <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+            : <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />}
+          <span className="font-semibold truncate">{title}</span>
+          {subtitle && <span className="text-xs text-muted-foreground shrink-0">{subtitle}</span>}
+          <span className="ml-auto text-xs text-muted-foreground shrink-0">
+            {count} image{count !== 1 ? "s" : ""}
+          </span>
+        </button>
+        {headerExtra && <div className="shrink-0">{headerExtra}</div>}
+      </div>
       {open && <div className="pl-6">{children}</div>}
     </div>
   );
@@ -108,10 +239,12 @@ const HEIGHTS = ["h-40", "h-52", "h-44", "h-60", "h-48"];
 
 function ImageGrid({
   images,
+  segResults,
   onSelect,
 }: {
   images: ImageRow[];
-  onSelect: (img: ImageRow) => void;
+  segResults?: SegResult[];
+  onSelect: (img: ImageRow, maskUrl?: string) => void;
 }) {
   if (images.length === 0) {
     return (
@@ -121,36 +254,71 @@ function ImageGrid({
     );
   }
 
+  const maskByImageId = Object.fromEntries(
+    (segResults ?? []).map((r) => [r.image_id, r])
+  );
+
   return (
-    <div className="columns-1 sm:columns-2 lg:columns-3 xl:columns-4 gap-3 space-y-3">
-      {images.map((img, i) => (
-        <button
-          key={img.id}
-          onClick={() => onSelect(img)}
-          className={`break-inside-avoid w-full ${HEIGHTS[i % HEIGHTS.length]} rounded-2xl overflow-hidden relative group shadow-soft hover:shadow-card transition-smooth`}
-        >
-          {img.publicUrl ? (
-            <img
-              src={img.publicUrl}
-              alt="Field image"
-              className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-smooth"
-            />
-          ) : (
-            <div className="absolute inset-0 bg-gradient-to-br from-emerald-800 via-green-600 to-lime-400 group-hover:scale-105 transition-smooth" />
-          )}
-          <div className="absolute inset-x-0 bottom-0 p-3 bg-gradient-to-t from-black/70 to-transparent text-white text-left">
-            <div className="text-[10px] opacity-80">
-              {img.upload_source === "manual" ? "📷 Manual" : "🛸 Drone"}{" "}
-              · {new Date(img.uploaded_at).toLocaleDateString()}
-            </div>
-            {img.gps && (
-              <div className="text-[9px] opacity-60">
-                {img.gps.lat.toFixed(4)}, {img.gps.lng.toFixed(4)}
+    <div className="space-y-4">
+      <div className="columns-1 sm:columns-2 lg:columns-3 xl:columns-4 gap-3 space-y-3">
+        {images.map((img, i) => {
+          const seg = maskByImageId[img.id];
+          return (
+            <button
+              key={img.id}
+              onClick={() => onSelect(img, seg?.mask_url)}
+              className={`break-inside-avoid w-full ${HEIGHTS[i % HEIGHTS.length]} rounded-2xl overflow-hidden relative group shadow-soft hover:shadow-card transition-smooth`}
+            >
+              {img.publicUrl ? (
+                <img
+                  src={img.publicUrl}
+                  alt="Field image"
+                  className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-smooth"
+                />
+              ) : (
+                <div className="absolute inset-0 bg-gradient-to-br from-emerald-800 via-green-600 to-lime-400 group-hover:scale-105 transition-smooth" />
+              )}
+              {/* Segmentation badge */}
+              {seg && (
+                <div className="absolute top-2 right-2 bg-black/60 backdrop-blur-sm rounded-full px-2 py-0.5 flex items-center gap-1">
+                  <Layers className="h-2.5 w-2.5 text-emerald-400" />
+                  <span className="text-[9px] text-emerald-300 font-medium">Segmented</span>
+                </div>
+              )}
+              <div className="absolute inset-x-0 bottom-0 p-3 bg-gradient-to-t from-black/70 to-transparent text-white text-left">
+                <div className="text-[10px] opacity-80">
+                  {img.upload_source === "manual" ? "📷 Manual" : "🛸 Drone"}{" "}
+                  · {new Date(img.uploaded_at).toLocaleDateString()}
+                </div>
+                {img.gps && (
+                  <div className="text-[9px] opacity-60">
+                    {img.gps.lat.toFixed(4)}, {img.gps.lng.toFixed(4)}
+                  </div>
+                )}
               </div>
-            )}
-          </div>
-        </button>
-      ))}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Per-image label bars when segmentation is done */}
+      {segResults && segResults.length > 0 && (
+        <div className="space-y-2 border-t border-border/30 pt-3">
+          <p className="text-xs font-medium text-muted-foreground">Segmentation breakdown</p>
+          {images.map((img) => {
+            const seg = maskByImageId[img.id];
+            if (!seg) return null;
+            return (
+              <div key={img.id} className="space-y-0.5">
+                <p className="text-[10px] text-muted-foreground truncate">
+                  {img.storage_path.split("/").pop()}
+                </p>
+                <LabelBar counts={seg.label_counts} />
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -158,13 +326,16 @@ function ImageGrid({
 // ── Lightbox ───────────────────────────────────────────────────────────────
 
 function Lightbox({ image, onClose }: { image: SelectedImage; onClose: () => void }) {
+  const hasMask = Boolean(image.maskUrl);
+  const [view, setView] = useState<"original" | "mask">("original");
+
   return (
     <div
       className="fixed inset-0 z-[1000] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
       onClick={onClose}
     >
       <div
-        className="bg-card rounded-2xl max-w-3xl w-full overflow-hidden shadow-card animate-fade-slide-down"
+        className="bg-card rounded-2xl max-w-5xl w-full overflow-hidden shadow-card animate-fade-slide-down"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -173,23 +344,77 @@ function Lightbox({ image, onClose }: { image: SelectedImage; onClose: () => voi
             <h3 className="font-display font-bold">{image.fieldName}</h3>
             <p className="text-xs text-muted-foreground">{image.flightLabel}</p>
           </div>
-          <button onClick={onClose} className="p-2 rounded-lg hover:bg-muted">
-            <X className="h-4 w-4" />
-          </button>
+          <div className="flex items-center gap-2">
+            {hasMask && (
+              <div className="flex rounded-lg border border-border overflow-hidden text-xs font-medium">
+                <button
+                  onClick={() => setView("original")}
+                  className={`px-3 py-1.5 transition-colors ${
+                    view === "original" ? "bg-foreground text-background" : "hover:bg-muted"
+                  }`}
+                >
+                  Original
+                </button>
+                <button
+                  onClick={() => setView("mask")}
+                  className={`px-3 py-1.5 transition-colors ${
+                    view === "mask" ? "bg-foreground text-background" : "hover:bg-muted"
+                  }`}
+                >
+                  Mask
+                </button>
+              </div>
+            )}
+            <button onClick={onClose} className="p-2 rounded-lg hover:bg-muted">
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </div>
 
-        {/* Image */}
+        {/* Side-by-side or single image */}
         <div className="p-4">
-          {image.publicUrl ? (
-            <img
-              src={image.publicUrl}
-              alt="Full size"
-              className="w-full rounded-xl object-contain max-h-[60vh]"
-            />
-          ) : (
-            <div className="w-full h-64 rounded-xl bg-muted flex items-center justify-center text-sm text-muted-foreground">
-              <ImageOff className="h-6 w-6 mr-2" /> No preview available
+          {hasMask ? (
+            <div className="grid grid-cols-2 gap-3">
+              {/* Original */}
+              <div className="space-y-1.5">
+                <p className="text-xs font-medium text-muted-foreground text-center">Original</p>
+                {image.publicUrl ? (
+                  <img
+                    src={image.publicUrl}
+                    alt="Original"
+                    className="w-full rounded-xl object-contain max-h-[55vh]"
+                  />
+                ) : (
+                  <div className="w-full h-48 rounded-xl bg-muted flex items-center justify-center text-sm text-muted-foreground">
+                    <ImageOff className="h-5 w-5 mr-2" /> No preview
+                  </div>
+                )}
+              </div>
+              {/* Segmentation mask */}
+              <div className="space-y-1.5">
+                <p className="text-xs font-medium text-muted-foreground text-center flex items-center justify-center gap-1">
+                  <Layers className="h-3 w-3" /> Segmentation Mask
+                </p>
+                <img
+                  src={image.maskUrl!}
+                  alt="Segmentation mask"
+                  className="w-full rounded-xl object-contain max-h-[55vh]"
+                />
+              </div>
             </div>
+          ) : (
+            /* No mask yet – single image */
+            image.publicUrl ? (
+              <img
+                src={image.publicUrl}
+                alt="Full size"
+                className="w-full rounded-xl object-contain max-h-[60vh]"
+              />
+            ) : (
+              <div className="w-full h-64 rounded-xl bg-muted flex items-center justify-center text-sm text-muted-foreground">
+                <ImageOff className="h-6 w-6 mr-2" /> No preview available
+              </div>
+            )
           )}
         </div>
 
@@ -221,29 +446,31 @@ function Lightbox({ image, onClose }: { image: SelectedImage; onClose: () => voi
 // ── Main Gallery page ──────────────────────────────────────────────────────
 
 export default function Gallery() {
-  const [fields, setFields]   = useState<Field[]>([]);
-  const [flights, setFlights] = useState<Flight[]>([]);
-  const [images, setImages]   = useState<ImageRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError]     = useState<string | null>(null);
+  const [fields,   setFields]   = useState<Field[]>([]);
+  const [flights,  setFlights]  = useState<Flight[]>([]);
+  const [images,   setImages]   = useState<ImageRow[]>([]);
+  const [loading,  setLoading]  = useState(true);
+  const [error,    setError]    = useState<string | null>(null);
   const [selected, setSelected] = useState<SelectedImage | null>(null);
+
+  // Per-flight segmentation state: flightId → SegState
+  const [segStates, setSegStates] = useState<Record<string, SegState>>({});
 
   const base = getBackendBaseUrl();
 
+  // ── Initial data load ──────────────────────────────────────────────────
   useEffect(() => {
     let active = true;
-
     const run = async () => {
       setLoading(true);
       setError(null);
       try {
-        const token = await getTokenFromSession();
+        const token   = await getTokenFromSession();
         const headers = { Authorization: `Bearer ${token}` };
 
-        // Fetch fields, flights, images in parallel
         const [fieldsRes, flightsRes, imagesRes] = await Promise.all([
-          fetch(`${base}/api/fields`,          { headers }),
-          fetch(`${base}/api/flights`,         { headers }),
+          fetch(`${base}/api/fields`,           { headers }),
+          fetch(`${base}/api/flights`,          { headers }),
           fetch(`${base}/api/images?limit=200`, { headers }),
         ]);
 
@@ -256,24 +483,67 @@ export default function Gallery() {
 
         if (!active) return;
 
-        // Resolve signed URLs in one batch per bucket
         const withUrls = await resolveSignedUrls(rawImages);
-
         setFields(fieldsData);
         setFlights(flightsData);
         setImages(withUrls);
+
+        // Pre-load any existing segmentation results
+        const segInit: Record<string, SegState> = {};
+        await Promise.all(
+          flightsData.map(async (fl) => {
+            try {
+              const res  = await fetch(`${base}/api/segment/flight/${fl.id}`, { headers });
+              if (!res.ok) return;
+              const json = await res.json();
+              if (json.results?.length > 0) {
+                segInit[fl.id] = { status: "done", results: json.results };
+              }
+            } catch { /* ignore */ }
+          })
+        );
+        if (active) setSegStates(segInit);
       } catch (e) {
         if (active) setError(e instanceof Error ? e.message : "Failed to load gallery");
       } finally {
         if (active) setLoading(false);
       }
     };
-
     run();
     return () => { active = false; };
   }, [base]);
 
-  // ── Group: field → flights + manual ─────────────────────────────────────
+  // ── Run segmentation for a flight ─────────────────────────────────────
+  const runSegmentation = useCallback(async (flightId: string, force = false) => {
+    setSegStates((prev) => ({ ...prev, [flightId]: { status: "loading" } }));
+    try {
+      const token = await getTokenFromSession();
+      const url   = `${base}/api/segment/flight/${flightId}${force ? "?force=true" : ""}`;
+      const res   = await fetch(url, {
+        method:  "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const msg = await res.text();
+        throw new Error(msg || `HTTP ${res.status}`);
+      }
+      const json = await res.json();
+      setSegStates((prev) => ({
+        ...prev,
+        [flightId]: { status: "done", results: json.results ?? [] },
+      }));
+    } catch (e) {
+      setSegStates((prev) => ({
+        ...prev,
+        [flightId]: {
+          status:  "error",
+          message: e instanceof Error ? e.message : "Segmentation failed",
+        },
+      }));
+    }
+  }, [base]);
+
+  // ── Group images ───────────────────────────────────────────────────────
   const grouped = fields.map((field) => {
     const fieldImgs    = images.filter((img) => img.field_id === field.id);
     const fieldFlights = flights.filter((fl)  => fl.field_id === field.id);
@@ -284,16 +554,15 @@ export default function Gallery() {
     }));
 
     const manual = fieldImgs.filter((img) => img.flight_id === null);
-
     return { field, byFlight, manual, total: fieldImgs.length };
   });
 
   const unlinked = images.filter((img) => img.field_id === null);
 
-  const openLightbox = (img: ImageRow, fieldName: string, flightLabel: string) =>
-    setSelected({ ...img, fieldName, flightLabel });
+  const openLightbox = (img: ImageRow, fieldName: string, flightLabel: string, maskUrl?: string) =>
+    setSelected({ ...img, fieldName, flightLabel, maskUrl });
 
-  // ── Render ───────────────────────────────────────────────────────────────
+  // ── Render ─────────────────────────────────────────────────────────────
   return (
     <div className="space-y-4">
       <PageHeader
@@ -302,25 +571,18 @@ export default function Gallery() {
         gradient="gradient-gallery"
       />
 
-      {/* Loading */}
       {loading && (
         <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
           <Loader2 className="h-5 w-5 animate-spin" /> Loading images…
         </div>
       )}
 
-      {/* Error */}
       {error && !loading && (
-        <Card className="p-4 text-sm text-red-600 border-red-200 bg-red-50">
-          {error}
-        </Card>
+        <Card className="p-4 text-sm text-red-600 border-red-200 bg-red-50">{error}</Card>
       )}
 
-      {/* Content */}
       {!loading && !error && (
         <div className="space-y-4">
-
-          {/* Per-field cards */}
           {grouped.map(({ field, byFlight, manual, total }) => (
             <Card key={field.id} className="p-5 space-y-4">
               <Section
@@ -330,34 +592,39 @@ export default function Gallery() {
                 defaultOpen
               >
                 <div className="space-y-5">
+                  {byFlight.map(({ flight, imgs }) => {
+                    const flightDate = new Date(
+                      (flight as any).flight_date ?? (flight as any).created_at
+                    ).toLocaleDateString();
+                    const seg        = segStates[flight.id] ?? { status: "idle" };
+                    const segResults = seg.status === "done" ? seg.results : undefined;
 
-                  {/* Flight sub-sections */}
-                  {byFlight.map(({ flight, imgs }) => (
-                    <Section
-                      key={flight.id}
-                      title="🛸 Flight"
-                      subtitle={`· ${new Date(
-                        (flight as any).flight_date ?? (flight as any).created_at
-                      ).toLocaleDateString()}`}
-                      count={imgs.length}
-                      defaultOpen={imgs.length > 0}
-                    >
-                      <ImageGrid
-                        images={imgs}
-                        onSelect={(img) =>
-                          openLightbox(
-                            img,
-                            field.field_name,
-                            `Flight · ${new Date(
-                              (flight as any).flight_date ?? (flight as any).created_at
-                            ).toLocaleDateString()}`
-                          )
+                    return (
+                      <Section
+                        key={flight.id}
+                        title="🛸 Flight"
+                        subtitle={`· ${flightDate}`}
+                        count={imgs.length}
+                        defaultOpen={imgs.length > 0}
+                        headerExtra={
+                          <SegButton
+                            flightId={flight.id}
+                            seg={seg}
+                            onSeg={runSegmentation}
+                          />
                         }
-                      />
-                    </Section>
-                  ))}
+                      >
+                        <ImageGrid
+                          images={imgs}
+                          segResults={segResults}
+                          onSelect={(img, maskUrl) =>
+                            openLightbox(img, field.field_name, `Flight · ${flightDate}`, maskUrl)
+                          }
+                        />
+                      </Section>
+                    );
+                  })}
 
-                  {/* Manual / no-flight */}
                   {manual.length > 0 && (
                     <Section
                       title="📷 Manual uploads"
@@ -374,7 +641,6 @@ export default function Gallery() {
                     </Section>
                   )}
 
-                  {/* Empty field */}
                   {byFlight.length === 0 && manual.length === 0 && (
                     <div className="flex items-center gap-2 text-xs text-muted-foreground py-1">
                       <ImageOff className="h-4 w-4" /> No images for this field yet.
@@ -385,7 +651,6 @@ export default function Gallery() {
             </Card>
           ))}
 
-          {/* Unlinked (no field) */}
           {unlinked.length > 0 && (
             <Card className="p-5">
               <Section
@@ -401,7 +666,6 @@ export default function Gallery() {
             </Card>
           )}
 
-          {/* Empty state */}
           {images.length === 0 && (
             <Card className="p-16 flex flex-col items-center gap-3 text-center text-muted-foreground">
               <ImageOff className="h-10 w-10 opacity-30" />
@@ -414,7 +678,6 @@ export default function Gallery() {
         </div>
       )}
 
-      {/* Lightbox */}
       {selected && (
         <Lightbox image={selected} onClose={() => setSelected(null)} />
       )}
