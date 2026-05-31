@@ -96,6 +96,25 @@ async def save_image(record: dict) -> dict:
         raise  # ← re-raise so analyze endpoint shows real error
 
 
+async def get_image_by_storage_path(storage_path: str, user_id: str) -> dict:
+    client = get_supabase()
+    if not client:
+        return {}
+    try:
+        result = (
+            client.table("images")
+            .select("*")
+            .eq("storage_path", storage_path)
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        logger.error(f"Failed to lookup image: {e}")
+        return {}
+
+
 async def get_images(user_id: str, field_id: str = None, flight_id: str = None, limit: int = 50):
     client = get_supabase()
     if not client:

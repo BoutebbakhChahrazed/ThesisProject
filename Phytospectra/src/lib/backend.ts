@@ -7,3 +7,7 @@ export function getBackendBaseUrl() {
   return "http://10.0.31.38:8000";
 }
 
+export function getBackendWsBaseUrl() {
+  return getBackendBaseUrl().replace(/^http/, "ws");
+}
+

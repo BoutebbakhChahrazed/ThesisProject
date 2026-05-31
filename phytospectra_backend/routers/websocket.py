@@ -4,6 +4,7 @@ from core.auth import verify_websocket_token
 from services import supabase_service
 from core.config import settings
 from services.pipeline import process_image
+from services.calibration import extract_gps_from_exif
 import os
 import uuid
 import logging
@@ -37,15 +38,19 @@ async def ingest_result(websocket: WebSocket):
 
 @router.websocket("/ws/analyze/from-storage")
 async def ws_analyze_from_storage(websocket: WebSocket):
-    # Auth first — before accept(), same pattern as your other routes
-    await verify_websocket_token(websocket)
+    user = await verify_websocket_token(websocket)
     await websocket.accept()
 
+    tmp_path = None
     try:
         data = await websocket.receive_json()
         object_path = data.get("object_path")
         bucket = data.get("bucket") or settings.SUPABASE_BUCKET_RAW
+        field_id = data.get("field_id")
         flight_id = data.get("flight_id")
+        drone_id = data.get("drone_id")
+        image_id = data.get("image_id")
+        user_id = user["sub"]
 
         if not object_path:
             await websocket.send_json({"type": "error", "message": "object_path is required"})
@@ -55,7 +60,7 @@ async def ws_analyze_from_storage(websocket: WebSocket):
 
         tmp_dir = os.path.join(settings.OUTPUT_FOLDER, "tmp")
         os.makedirs(tmp_dir, exist_ok=True)
-        ext = os.path.splitext(object_path)[1] or ".tif"
+        ext = os.path.splitext(object_path)[1].lower() or ".jpg"
         tmp_path = os.path.join(tmp_dir, f"input_{uuid.uuid4().hex}{ext}")
 
         await supabase_service.download_image(
@@ -64,16 +69,79 @@ async def ws_analyze_from_storage(websocket: WebSocket):
             dest_path=tmp_path,
         )
 
-        await websocket.send_json({"type": "progress", "message": "Running classification pipeline..."})
+        if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
+            await websocket.send_json({"type": "error", "message": "Download failed or empty file"})
+            return
 
-        result = await process_image(tmp_path, flight_id=flight_id)
+        if not image_id:
+            existing = await supabase_service.get_image_by_storage_path(object_path, user_id)
+            image_id = existing.get("id") if existing else None
 
-        await websocket.send_json(result)
+        if not image_id:
+            gps = extract_gps_from_exif(tmp_path)
+            image_row = await supabase_service.save_image({
+                "user_id":       user_id,
+                "field_id":      field_id,
+                "flight_id":     flight_id,
+                "drone_id":      drone_id,
+                "storage_path":  object_path,
+                "bucket_name":   bucket,
+                "gps":           gps,
+                "gps_source":    "MAPIR Survey3W EXIF",
+                "upload_source": data.get("upload_source", "manual"),
+            })
+            image_id = image_row.get("id")
+
+        if not image_id:
+            await websocket.send_json({"type": "error", "message": "Image record not found"})
+            return
+
+        await websocket.send_json({"type": "progress", "message": "Running AI classification pipeline..."})
+
+        result = await process_image(
+            image_path=tmp_path,
+            user_id=user_id,
+            image_id=image_id,
+            field_id=field_id,
+            flight_id=flight_id,
+            drone_id=drone_id,
+        )
+
+        client = supabase_service.get_supabase()
+        drone_image_url = None
+        if client:
+            drone_image_url = client.storage.from_(bucket).get_public_url(object_path)
+
+        await websocket.send_json({
+            "type":            "result",
+            "zone_id":         result.get("segmentation_id") or field_id or "unknown",
+            "timestamp":       result.get("timestamp"),
+            "gps":             result.get("gps"),
+            "health_score":    result.get("health_score"),
+            "stress_class":    result.get("stress_class"),
+            "confidence":      result.get("confidence"),
+            "heatmap_url":     result.get("heatmap_url"),
+            "drone_image_url": drone_image_url,
+            "storage_path":    object_path,
+            "bucket":          bucket,
+            "image_id":        image_id,
+        })
 
     except WebSocketDisconnect:
         logger.info("Analyze client disconnected.")
     except Exception as e:
         logger.exception("ws_analyze_from_storage failed")
-        await websocket.send_json({"type": "error", "message": str(e)})
+        try:
+            await websocket.send_json({"type": "error", "message": str(e)})
+        except Exception:
+            pass
     finally:
-        await websocket.close()
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        try:
+            await websocket.close()
+        except Exception:
+            pass

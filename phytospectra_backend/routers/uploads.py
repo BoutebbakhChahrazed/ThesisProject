@@ -1,8 +1,6 @@
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
 from typing import Optional
-import uuid, os, logging
-import tempfile
-from datetime import datetime, timezone
+import uuid, os, logging, tempfile
 
 from core.auth import get_current_user
 from core.config import settings
@@ -28,10 +26,10 @@ async def upload_image(
     user=Depends(get_current_user),
 ):
     user_id = user["sub"]
-    ext     = os.path.splitext(file.filename)[1].lower()
+    ext = os.path.splitext(file.filename or "")[1].lower()
 
     if ext not in MIME_TYPES:
-        raise HTTPException(status_code=400, detail=f"File type {ext} not allowed")
+        raise HTTPException(status_code=400, detail=f"File type '{ext}' not allowed")
 
     field_seg    = field_id  or "nofield"
     flight_seg   = flight_id or "noflight"
@@ -52,21 +50,20 @@ async def upload_image(
 
     # ── Extract GPS from EXIF ─────────────────────────────────────────────
     gps = None
-    tmp_path = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4().hex}{ext}")
+    tmp = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4().hex}{ext}")
     try:
-        with open(tmp_path, "wb") as f:
+        with open(tmp, "wb") as f:
             f.write(contents)
-        gps = extract_gps_from_exif(tmp_path)
+        gps = extract_gps_from_exif(tmp)
     except Exception as e:
         logger.warning(f"GPS extraction failed (non-fatal): {e}")
-        # Don't crash — GPS is optional for manual uploads
     finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
     # ── Save record to DB ─────────────────────────────────────────────────
     try:
-        await save_image({
+        image_row = await save_image({
             "user_id":       user_id,
             "field_id":      field_id,
             "flight_id":     flight_id,
@@ -83,6 +80,7 @@ async def upload_image(
     return {
         "storage_path": storage_path,
         "bucket":       settings.SUPABASE_BUCKET_RAW,
+        "image_id":     image_row.get("id"),
         "gps":          gps,
-        "message":      "Upload successful — use storage_path in /api/analyze/from-storage"
+        "message":      "Upload successful — image saved to storage for AI analysis",
     }
