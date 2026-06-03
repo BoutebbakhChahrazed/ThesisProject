@@ -30,7 +30,16 @@ import { useWebSocket } from "./hooks/useWebSocket";
 import { AuthProvider, useAuth } from "./hooks/useAuth";
 import "leaflet/dist/leaflet.css";
 
-const queryClient = new QueryClient();
+// const queryClient = new QueryClient();
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      retry: 3,              // retry failed requests 3 times
+      retryDelay: 1000,      // wait 1s between retries
+      staleTime: 0,
+    },
+  },
+});
 
 const ProtectedShell = ({ wsUrl, setWsUrl, threshold, setThreshold, wsConnected }: {
   wsUrl: string; setWsUrl: (s: string) => void; threshold: number; setThreshold: (n: number) => void; wsConnected: boolean;

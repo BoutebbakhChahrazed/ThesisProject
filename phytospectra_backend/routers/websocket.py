@@ -15,7 +15,10 @@ router = APIRouter()
 
 @router.websocket("/ws/dashboard")
 async def dashboard_feed(websocket: WebSocket):
-    await verify_websocket_token(websocket)
+    await websocket.accept()                      # ← accept first
+    user = await verify_websocket_token(websocket)
+    if not user:
+        return
     await manager.connect(websocket)
     try:
         while True:
@@ -26,8 +29,10 @@ async def dashboard_feed(websocket: WebSocket):
 
 @router.websocket("/ws/ingest")
 async def ingest_result(websocket: WebSocket):
-    await verify_websocket_token(websocket)
-    await websocket.accept()
+    await websocket.accept()                      # ← accept first
+    user = await verify_websocket_token(websocket)
+    if not user:
+        return
     try:
         async for data in websocket.iter_json():
             await manager.broadcast(data)
@@ -38,29 +43,36 @@ async def ingest_result(websocket: WebSocket):
 
 @router.websocket("/ws/analyze/from-storage")
 async def ws_analyze_from_storage(websocket: WebSocket):
+    await websocket.accept()                      # ← must be first
+
+    # Auth after accept — reject by sending error + closing, not by refusing upgrade
     user = await verify_websocket_token(websocket)
-    await websocket.accept()
+    if not user:
+        await websocket.send_json({"type": "error", "message": "Unauthorized"})
+        await websocket.close(code=4401)
+        return
 
     tmp_path = None
     try:
-        data = await websocket.receive_json()
+        data        = await websocket.receive_json()
         object_path = data.get("object_path")
-        bucket = data.get("bucket") or settings.SUPABASE_BUCKET_RAW
-        field_id = data.get("field_id")
-        flight_id = data.get("flight_id")
-        drone_id = data.get("drone_id")
-        image_id = data.get("image_id")
-        user_id = user["sub"]
+        bucket      = data.get("bucket") or settings.SUPABASE_BUCKET_RAW
+        field_id    = data.get("field_id")
+        flight_id   = data.get("flight_id")
+        drone_id    = data.get("drone_id")
+        image_id    = data.get("image_id")
+        user_id     = user["sub"]
 
         if not object_path:
             await websocket.send_json({"type": "error", "message": "object_path is required"})
             return
 
-        await websocket.send_json({"type": "progress", "message": "Downloading image from storage..."})
+        # ── Download ──────────────────────────────────────────────────────
+        await websocket.send_json({"type": "progress", "message": "Downloading image from storage…"})
 
-        tmp_dir = os.path.join(settings.OUTPUT_FOLDER, "tmp")
+        tmp_dir  = os.path.join(settings.OUTPUT_FOLDER, "tmp")
         os.makedirs(tmp_dir, exist_ok=True)
-        ext = os.path.splitext(object_path)[1].lower() or ".jpg"
+        ext      = os.path.splitext(object_path)[1].lower() or ".jpg"
         tmp_path = os.path.join(tmp_dir, f"input_{uuid.uuid4().hex}{ext}")
 
         await supabase_service.download_image(
@@ -73,12 +85,14 @@ async def ws_analyze_from_storage(websocket: WebSocket):
             await websocket.send_json({"type": "error", "message": "Download failed or empty file"})
             return
 
+        # ── Resolve image record ──────────────────────────────────────────
         if not image_id:
             existing = await supabase_service.get_image_by_storage_path(object_path, user_id)
             image_id = existing.get("id") if existing else None
 
         if not image_id:
-            gps = extract_gps_from_exif(tmp_path)
+            await websocket.send_json({"type": "progress", "message": "Saving image record…"})
+            gps       = extract_gps_from_exif(tmp_path)
             image_row = await supabase_service.save_image({
                 "user_id":       user_id,
                 "field_id":      field_id,
@@ -93,10 +107,12 @@ async def ws_analyze_from_storage(websocket: WebSocket):
             image_id = image_row.get("id")
 
         if not image_id:
-            await websocket.send_json({"type": "error", "message": "Image record not found"})
+            await websocket.send_json({"type": "error", "message": "Could not resolve image record"})
             return
 
-        await websocket.send_json({"type": "progress", "message": "Running AI classification pipeline..."})
+        # ── Run pipeline ──────────────────────────────────────────────────
+        await websocket.send_json({"type": "progress", "message": "Preprocessing image (RGN → 4-channel + NDVI)…"})
+        await websocket.send_json({"type": "progress", "message": "Running ViT classification…"})
 
         result = await process_image(
             image_path=tmp_path,
@@ -107,7 +123,8 @@ async def ws_analyze_from_storage(websocket: WebSocket):
             drone_id=drone_id,
         )
 
-        client = supabase_service.get_supabase()
+        # ── Public URL for original image ─────────────────────────────────
+        client          = supabase_service.get_supabase()
         drone_image_url = None
         if client:
             drone_image_url = client.storage.from_(bucket).get_public_url(object_path)

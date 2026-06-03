@@ -1,341 +1,380 @@
 """
-POST /api/segment/flight/{flight_id}
+routers/segment_flight.py
 
-For each image linked to a flight:
-  1. Download from Supabase storage
-  2. Tile into 512×512 patches (with overlap to avoid seam artefacts)
-  3. Run segformer_b0_v5_1.pt on every patch
-  4. Stitch soft-logit tiles back into a full-res mask
-  5. Colourise the mask and upload to "<bucket>-masks" bucket
-  6. Insert / upsert a row into `image_segmentations` table
+POST /api/segment/flight/{flight_id}   — run SegFormer on every image in a flight
+GET  /api/segment/flight/{flight_id}   — return cached results (no inference)
+POST /api/segment/image/{image_id}     — run SegFormer on a single already-uploaded image
 
-Returns JSON: { results: [{ image_id, mask_url, label_counts }] }
-
-Add to your FastAPI app:
-    from segment_flight import router as segment_router
-    app.include_router(segment_router)
-
-Dependencies (add to requirements.txt if not present):
-    torch torchvision transformers Pillow numpy supabase
+Model: segformer_b0_v5_1.pt
+Preprocessing matches the v5.1 training script exactly (see services/segformer_inference.py).
 """
 
 from __future__ import annotations
 
 import io
 import json
-import math
+import logging
 import os
-import tempfile
-from pathlib import Path
+import uuid
 from typing import Any
 
-import numpy as np
-import torch
-import torch.nn.functional as F
 from fastapi import APIRouter, Depends, HTTPException
-from PIL import Image
-from transformers import SegformerForSemanticSegmentation
 
-# ── Local imports – adjust to your project layout ──────────────────────────
-from dependencies import get_current_user          # your auth dep
-from integrations.supabase_client import supabase  # your supabase client
+from core.auth import get_current_user
+from core.config import settings
+from core.connection_manager import manager
+from services import supabase_service
+from services.calibration import extract_gps_from_exif
+from services.segformer_inference import run_segformer
 
-router = APIRouter()
-
-# ── Model config ─────────────────────────────────────────────────────────────
-
-MODEL_PATH   = Path(__file__).parent / "models" / "segformer_b0_v5_1.pt"
-PATCH_SIZE   = 512
-OVERLAP      = 64          # overlap between tiles to soften seam artefacts
-DEVICE       = "cuda" if torch.cuda.is_available() else "cpu"
-
-# SegFormer-B0 label palette (extend / replace with your own class colours)
-# Index → (R, G, B)
-PALETTE: dict[int, tuple[int, int, int]] = {
-    0: (0,   128,   0),   # vegetation  – green
-    1: (194, 178, 128),   # soil/bare   – sand
-    2: (0,   0,   255),   # water       – blue
-    3: (255, 255,   0),   # crop        – yellow
-    4: (128,   0, 128),   # weed        – purple
-    5: (255, 165,   0),   # stress      – orange
-    # add more as needed …
-}
-NUM_LABELS = max(PALETTE.keys()) + 1
-
-# ── Model loader (singleton) ──────────────────────────────────────────────────
-
-_model: SegformerForSemanticSegmentation | None = None
-
-def get_model() -> SegformerForSemanticSegmentation:
-    global _model
-    if _model is None:
-        if not MODEL_PATH.exists():
-            raise RuntimeError(f"Model not found at {MODEL_PATH}")
-        # The checkpoint was saved with torch.save(model.state_dict(), …)
-        # If you saved the whole model use torch.load directly.
-        model = SegformerForSemanticSegmentation.from_pretrained(
-            "nvidia/mit-b0",
-            num_labels=NUM_LABELS,
-            ignore_mismatched_sizes=True,
-        )
-        state = torch.load(MODEL_PATH, map_location=DEVICE)
-        # Support both raw state-dict and {"model_state_dict": …} checkpoints
-        if isinstance(state, dict) and "model_state_dict" in state:
-            state = state["model_state_dict"]
-        model.load_state_dict(state, strict=False)
-        model.to(DEVICE).eval()
-        _model = model
-    return _model
-
-
-# ── Core tiling / inference helpers ──────────────────────────────────────────
-
-def _normalise(patch_np: np.ndarray) -> torch.Tensor:
-    """HWC uint8 → 1CHW float32 tensor, ImageNet-normalised."""
-    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-    std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-    x = patch_np.astype(np.float32) / 255.0
-    x = (x - mean) / std                         # HWC
-    x = torch.from_numpy(x).permute(2, 0, 1)     # CHW
-    return x.unsqueeze(0).to(DEVICE)             # 1CHW
-
-
-@torch.no_grad()
-def segment_image(pil_img: Image.Image) -> np.ndarray:
-    """
-    Tile a full-resolution PIL image, run SegFormer on each tile,
-    stitch soft logits back, return an (H, W) uint8 class-index array.
-    """
-    model  = get_model()
-    W, H   = pil_img.size
-    img_np = np.array(pil_img.convert("RGB"))
-
-    step   = PATCH_SIZE - OVERLAP
-    # Accumulate logit sums and counts for soft-max stitching
-    logit_acc = np.zeros((NUM_LABELS, H, W), dtype=np.float32)
-    count_acc = np.zeros((H, W),             dtype=np.float32)
-
-    rows = list(range(0, H, step))
-    cols = list(range(0, W, step))
-
-    for r in rows:
-        for c in cols:
-            r1, r2 = r, min(r + PATCH_SIZE, H)
-            c1, c2 = c, min(c + PATCH_SIZE, W)
-            ph, pw  = r2 - r1, c2 - c1
-
-            patch = img_np[r1:r2, c1:c2]           # actual (possibly partial) tile
-
-            # Pad to 512×512 if tile is smaller (edge tiles)
-            if ph < PATCH_SIZE or pw < PATCH_SIZE:
-                pad = np.zeros((PATCH_SIZE, PATCH_SIZE, 3), dtype=np.uint8)
-                pad[:ph, :pw] = patch
-                patch = pad
-
-            tensor = _normalise(patch)              # 1×3×512×512
-            out    = model(pixel_values=tensor)     # SegformerModelOutput
-            logits = out.logits                     # 1×C×H'×W'  (H'=H/4)
-
-            # Upsample logits to 512×512
-            logits = F.interpolate(
-                logits, size=(PATCH_SIZE, PATCH_SIZE),
-                mode="bilinear", align_corners=False
-            )                                       # 1×C×512×512
-            logits_np = logits.squeeze(0).cpu().numpy()  # C×512×512
-
-            # Accumulate into the full canvas
-            logit_acc[:, r1:r2, c1:c2] += logits_np[:, :ph, :pw]
-            count_acc[r1:r2, c1:c2]    += 1.0
-
-    # Avoid divide-by-zero
-    count_acc = np.where(count_acc == 0, 1, count_acc)
-    logit_acc /= count_acc[np.newaxis]              # average logits
-
-    class_map = logit_acc.argmax(axis=0).astype(np.uint8)  # H×W
-    return class_map
-
-
-def colourise(class_map: np.ndarray) -> Image.Image:
-    """Convert H×W class-index array → RGB PIL image using PALETTE."""
-    H, W  = class_map.shape
-    rgb   = np.zeros((H, W, 3), dtype=np.uint8)
-    for cls_idx, colour in PALETTE.items():
-        mask = class_map == cls_idx
-        rgb[mask] = colour
-    return Image.fromarray(rgb, "RGB")
-
-
-def count_labels(class_map: np.ndarray) -> dict[str, int]:
-    unique, counts = np.unique(class_map, return_counts=True)
-    return {str(int(u)): int(c) for u, c in zip(unique, counts)}
+logger = logging.getLogger(__name__)
+router = APIRouter(tags=["Segmentation"])
 
 
 # ── Storage helpers ───────────────────────────────────────────────────────────
 
 def _mask_bucket(source_bucket: str) -> str:
-    """Derive the mask bucket name from the source bucket."""
     return f"{source_bucket}-masks"
 
 
-async def _ensure_bucket(bucket: str) -> None:
-    """Create the masks bucket if it doesn't exist (public, 1-day expiry)."""
-    existing = supabase.storage.list_buckets()
-    names    = {b.name for b in existing}
-    if bucket not in names:
-        supabase.storage.create_bucket(bucket, options={"public": True})
-
-
-async def upload_mask(
-    mask_img: Image.Image,
-    source_bucket: str,
-    source_path: str,
-    image_id: str,
-) -> str:
-    """Upload colourised mask PNG, return its public URL."""
-    bucket = _mask_bucket(source_bucket)
-    await _ensure_bucket(bucket)
-
-    stem      = Path(source_path).stem
-    mask_path = f"masks/{image_id}/{stem}_seg.png"
-
+async def _upload_mask_image(mask_image, source_bucket: str, image_id: str, user_id: str, flight_id: str) -> str:
+    """Save colourised mask PNG to Supabase, return public URL."""
     buf = io.BytesIO()
-    mask_img.save(buf, format="PNG")
+    mask_image.save(buf, format="PNG")
     buf.seek(0)
 
-    supabase.storage.from_(bucket).upload(
-        path=mask_path,
-        file=buf.read(),
-        file_options={"content-type": "image/png", "upsert": "true"},
-    )
+    mask_filename   = f"mask_{uuid.uuid4().hex[:8]}.png"
+    mask_storage    = f"{user_id}/{flight_id or 'noflight'}/{mask_filename}"
+    mask_local_path = os.path.join(settings.OUTPUT_FOLDER, mask_filename)
+    os.makedirs(settings.OUTPUT_FOLDER, exist_ok=True)
 
-    public_url = supabase.storage.from_(bucket).get_public_url(mask_path)
-    return public_url
+    with open(mask_local_path, "wb") as f:
+        f.write(buf.getvalue())
+
+    try:
+        mask_url = await supabase_service.upload_image(
+            mask_local_path,
+            _mask_bucket(source_bucket),
+            mask_storage,
+        )
+    finally:
+        try:
+            os.remove(mask_local_path)
+        except OSError:
+            pass
+
+    return mask_url
 
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
-def upsert_segmentation(
+async def _upsert_segmentation(
     image_id: str,
-    flight_id: str,
+    flight_id: str | None,
     mask_url: str,
-    label_counts: dict[str, int],
-    model_name: str = "segformer_b0_v5_1",
-) -> None:
-    supabase.table("image_segmentations").upsert(
-        {
-            "image_id":     image_id,
-            "flight_id":    flight_id,
-            "mask_url":     mask_url,
-            "label_counts": json.dumps(label_counts),
-            "model_name":   model_name,
-        },
-        on_conflict="image_id",
-    ).execute()
+    label_counts: dict,
+    stats: dict,
+    user_id: str,
+    field_id: str | None = None,
+    drone_id: str | None = None,
+    gps: dict | None = None,
+) -> dict:
+    record = {
+        "user_id":               user_id,
+        "image_id":              image_id,
+        "field_id":              field_id,
+        "flight_id":             flight_id,
+        "drone_id":              drone_id,
+        "heatmap_url":           mask_url,          # reuse heatmap_url column for mask
+        "stress_class":          stats["stress_class"],
+        "confidence":            stats["confidence"],
+        "health_score":          stats["health_score"],
+        "health_percentage":     stats["health_percentage"],
+        "healthy_pixel_count":   stats["healthy_pixel_count"],
+        "stressed_pixel_count":  stats["stressed_pixel_count"],
+        "ndvi_mean":             None,               # not computed by SegFormer path
+        "gndvi_mean":            None,
+        "gps":                   gps,
+        # store label_counts as a JSON string in a spare text column if available,
+        # or just include it in the broadcast — adapt to your actual schema
+    }
+    return await supabase_service.save_segmentation(record)
 
 
-def fetch_existing_segmentation(image_id: str) -> dict | None:
-    res = (
-        supabase.table("image_segmentations")
-        .select("*")
-        .eq("image_id", image_id)
-        .maybe_single()
-        .execute()
-    )
-    return res.data
+async def _fetch_cached(image_id: str) -> dict | None:
+    client = supabase_service.get_supabase()
+    if not client:
+        return None
+    try:
+        res = (
+            client.table("segmentations")
+            .select("*")
+            .eq("image_id", image_id)
+            .order("processed_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        return res.data[0] if res.data else None
+    except Exception as e:
+        logger.warning(f"Cache lookup failed for image {image_id}: {e}")
+        return None
 
 
-# ── Route ─────────────────────────────────────────────────────────────────────
+# ── Core per-image processing ─────────────────────────────────────────────────
 
-@router.post("/api/segment/flight/{flight_id}")
+async def _process_one_image(
+    *,
+    image_row: dict,
+    user_id: str,
+    force: bool,
+    tmp_dir: str,
+) -> dict:
+    """Download, segment, upload mask, persist, broadcast — for one image row."""
+
+    image_id     = image_row["id"]
+    storage_path = image_row["storage_path"]
+    bucket       = image_row.get("bucket_name") or settings.SUPABASE_BUCKET_RAW
+    flight_id    = image_row.get("flight_id")
+    field_id     = image_row.get("field_id")
+    drone_id     = image_row.get("drone_id")
+
+    # Return cached result unless forced
+    if not force:
+        cached = await _fetch_cached(image_id)
+        if cached:
+            logger.info(f"Returning cached segmentation for image {image_id}")
+            return {
+                "image_id":    image_id,
+                "mask_url":    cached.get("heatmap_url"),
+                "stress_class": cached.get("stress_class"),
+                "health_score": cached.get("health_score"),
+                "health_percentage": cached.get("health_percentage"),
+                "label_counts": {},
+                "cached":      True,
+            }
+
+    # Download image to temp file
+    ext      = os.path.splitext(storage_path)[1].lower() or ".png"
+    tmp_path = os.path.join(tmp_dir, f"seg_{uuid.uuid4().hex}{ext}")
+
+    try:
+        await supabase_service.download_image(storage_path, bucket, tmp_path)
+
+        if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
+            raise RuntimeError(f"Downloaded file is empty: {storage_path}")
+
+        # GPS
+        gps = extract_gps_from_exif(tmp_path)
+
+        # ── Run SegFormer ──────────────────────────────────────────────────
+        result = run_segformer(tmp_path)   # preprocessing matches training exactly
+
+        stats = {
+            "stress_class":         result["stress_class"],
+            "confidence":           result["confidence"],
+            "health_score":         result["health_score"],
+            "health_percentage":    result["health_percentage"],
+            "healthy_pixel_count":  result["healthy_pixel_count"],
+            "stressed_pixel_count": result["stressed_pixel_count"],
+        }
+
+        # Upload colourised mask
+        mask_url = await _upload_mask_image(
+            result["mask_image"], bucket, image_id, user_id, flight_id or "noflight"
+        )
+
+        # Persist segmentation record
+        saved = await _upsert_segmentation(
+            image_id=image_id,
+            flight_id=flight_id,
+            mask_url=mask_url,
+            label_counts=result["label_counts"],
+            stats=stats,
+            user_id=user_id,
+            field_id=field_id,
+            drone_id=drone_id,
+            gps=gps,
+        )
+
+        payload = {
+            "image_id":         image_id,
+            "segmentation_id":  saved.get("id"),
+            "mask_url":         mask_url,
+            "label_counts":     result["label_counts"],
+            "gps":              gps,
+            "cached":           False,
+            **stats,
+        }
+
+        # Broadcast over WebSocket (same pattern as ViT pipeline)
+        await manager.broadcast(payload)
+        logger.info(
+            f"Segmented image {image_id} | "
+            f"stress={stats['stress_class']} | "
+            f"health={stats['health_score']:.1f}%"
+        )
+        return payload
+
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@router.post("/segment/flight/{flight_id}")
 async def segment_flight(
     flight_id: str,
-    force: bool = False,          # ?force=true to re-run even if mask exists
+    force: bool = False,
     user: Any = Depends(get_current_user),
 ) -> dict:
     """
     Run SegFormer segmentation on all images attached to a flight.
-    Returns a list of per-image results with mask_url and label_counts.
+    Pass ?force=true to re-run even when a cached result exists.
     """
-    # 1. Fetch image rows for this flight
+    user_id = user["sub"]
+    logger.info(f"segment_flight called | flight_id={flight_id} | user_id={user_id}")
+    client  = supabase_service.get_supabase()
+    if not client:
+        raise HTTPException(503, "Supabase unavailable")
+
+    # ── Fetch images — user_id is the ownership check, skip flights table ───
     img_res = (
-        supabase.table("images")
-        .select("id, storage_path, bucket_name, flight_id")
+        client.table("images")
+        .select("id, storage_path, bucket_name, flight_id, field_id, drone_id")
         .eq("flight_id", flight_id)
+        .eq("user_id", user_id)
         .execute()
     )
     flight_images: list[dict] = img_res.data or []
+    logger.info(f"Images query returned {len(flight_images)} rows for flight {flight_id}")
+
     if not flight_images:
-        raise HTTPException(404, "No images found for this flight")
+        # Try without user_id filter to see if that's the mismatch
+        all_res = (
+            client.table("images")
+            .select("id, flight_id, user_id, storage_path")
+            .eq("flight_id", flight_id)
+            .limit(5)
+            .execute()
+        )
+        logger.warning(
+            f"No images for flight_id={flight_id} with user_id={user_id}. "
+            f"Images with this flight_id (any user): {all_res.data}"
+        )
+        raise HTTPException(
+            404,
+            f"No images found for flight {flight_id}."
+        )
+
+    tmp_dir = os.path.join(settings.OUTPUT_FOLDER, "tmp")
+    os.makedirs(tmp_dir, exist_ok=True)
 
     results = []
+    errors  = []
 
     for img_row in flight_images:
-        image_id     = img_row["id"]
-        storage_path = img_row["storage_path"]
-        bucket       = img_row["bucket_name"]
+        try:
+            result = await _process_one_image(
+                image_row=img_row,
+                user_id=user_id,
+                force=force,
+                tmp_dir=tmp_dir,
+            )
+            results.append(result)
+        except Exception as e:
+            logger.exception(f"Failed to segment image {img_row.get('id')}: {e}")
+            errors.append({"image_id": img_row.get("id"), "error": str(e)})
 
-        # Skip if already segmented (unless forced)
-        if not force:
-            existing = fetch_existing_segmentation(image_id)
-            if existing:
-                results.append({
-                    "image_id":    image_id,
-                    "mask_url":    existing["mask_url"],
-                    "label_counts": json.loads(existing.get("label_counts") or "{}"),
-                    "cached":      True,
-                })
-                continue
-
-        # 2. Download original image from Supabase storage
-        raw_bytes = supabase.storage.from_(bucket).download(storage_path)
-        pil_img   = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
-
-        # 3. Tile → infer → stitch
-        class_map = segment_image(pil_img)          # H×W uint8
-
-        # 4. Colourise
-        mask_img     = colourise(class_map)
-        label_counts = count_labels(class_map)
-
-        # 5. Upload mask
-        mask_url = await upload_mask(mask_img, bucket, storage_path, image_id)
-
-        # 6. Persist to DB
-        upsert_segmentation(image_id, flight_id, mask_url, label_counts)
-
-        results.append({
-            "image_id":    image_id,
-            "mask_url":    mask_url,
-            "label_counts": label_counts,
-            "cached":      False,
-        })
-
-    return {"flight_id": flight_id, "results": results}
+    return {
+        "flight_id": flight_id,
+        "processed": len(results),
+        "failed":    len(errors),
+        "results":   results,
+        "errors":    errors,
+    }
 
 
-# ── Optional: GET to check status without re-running ─────────────────────────
-
-@router.get("/api/segment/flight/{flight_id}")
+@router.get("/segment/flight/{flight_id}")
 async def get_flight_segmentations(
     flight_id: str,
     user: Any = Depends(get_current_user),
 ) -> dict:
-    """Return cached segmentation results for a flight (no inference)."""
-    res = (
-        supabase.table("image_segmentations")
-        .select("image_id, mask_url, label_counts, model_name")
-        .eq("flight_id", flight_id)
-        .execute()
-    )
-    rows = res.data or []
+    """Return cached segmentation results for a flight. Returns empty list if none exist."""
+    client = supabase_service.get_supabase()
+    if not client:
+        raise HTTPException(503, "Supabase unavailable")
+
+    try:
+        res = (
+            client.table("segmentations")
+            .select("image_id, heatmap_url, stress_class, health_score, health_percentage, "
+                    "healthy_pixel_count, stressed_pixel_count, confidence, processed_at")
+            .eq("flight_id", flight_id)
+            .order("processed_at", desc=True)
+            .execute()
+        )
+        rows = res.data or []
+    except Exception as e:
+        logger.warning(f"GET segment/flight/{flight_id}: query error {e}")
+        rows = []
+
+    logger.info(f"GET segment/flight/{flight_id}: {len(rows)} cached results")
     return {
         "flight_id": flight_id,
+        "count":     len(rows),
         "results": [
             {
-                "image_id":    r["image_id"],
-                "mask_url":    r["mask_url"],
-                "label_counts": json.loads(r.get("label_counts") or "{}"),
+                "image_id":             r["image_id"],
+                "mask_url":             r["heatmap_url"],
+                "stress_class":         r.get("stress_class"),
+                "health_score":         r.get("health_score"),
+                "health_percentage":    r.get("health_percentage"),
+                "healthy_pixel_count":  r.get("healthy_pixel_count"),
+                "stressed_pixel_count": r.get("stressed_pixel_count"),
+                "confidence":           r.get("confidence"),
+                "processed_at":         r.get("processed_at"),
             }
             for r in rows
         ],
     }
+
+
+@router.post("/segment/image/{image_id}")
+async def segment_single_image(
+    image_id: str,
+    force: bool = False,
+    user: Any = Depends(get_current_user),
+) -> dict:
+    """
+    Run SegFormer on a single already-uploaded image (by image_id).
+    Useful for re-segmenting individual frames without a full flight re-run.
+    """
+    user_id = user["sub"]
+    client  = supabase_service.get_supabase()
+    if not client:
+        raise HTTPException(503, "Supabase unavailable")
+
+    res = (
+        client.table("images")
+        .select("id, storage_path, bucket_name, flight_id, field_id, drone_id")
+        .eq("id", image_id)
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    if not res.data:
+        raise HTTPException(404, f"Image {image_id} not found")
+
+    tmp_dir = os.path.join(settings.OUTPUT_FOLDER, "tmp")
+    os.makedirs(tmp_dir, exist_ok=True)
+
+    result = await _process_one_image(
+        image_row=res.data[0],
+        user_id=user_id,
+        force=force,
+        tmp_dir=tmp_dir,
+    )
+    return {"status": "success", **result}

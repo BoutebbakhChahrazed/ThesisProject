@@ -6,7 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from core.config import settings
 from core.watcher import start_watcher
 from routers import websocket, flights, detections, health, analyze
-from routers import uploads, fields, drones, images, camera
+from routers import uploads, fields, drones, images, camera, esp32
+from routers import Segmentflight # ← ADD
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,22 +27,10 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=[
-#         "http://10.0.31.38:8080",
-#         "http://localhost:8080",
-#         "http://localhost:5173",
-#         "http://10.0.31.38:5173",
-#     ],
-#     allow_credentials=True,
-#     allow_methods=["*"],
-#     allow_headers=["*"],
-# )
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,  # Must be False when using wildcard origin
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -56,3 +45,5 @@ app.include_router(drones.router,     prefix="/api")
 app.include_router(analyze.router,    prefix="/api")
 app.include_router(images.router,     prefix="/api")
 app.include_router(camera.router,     prefix="/api")
+app.include_router(esp32.router,      prefix="/api")
+app.include_router(Segmentflight.router, prefix="/api")  # ← ADD

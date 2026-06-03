@@ -4,14 +4,16 @@ import logo from "@/assets/phytospectra-logo.png";
 import { useAuth } from "@/hooks/useAuth";
 
 const farmerLinks = [
-  { to: "/live", label: "Live Monitor", icon: Map, emoji: "🗺️" },
+  // { to: "/live", label: "Live Monitor", icon: Map, emoji: "🗺️" },
   // { to: "/farmer-weather", label: "Weather (next week)", icon: Leaf, emoji: "🌦️" },
   { to: "/analytics", label: "Field Analytics", icon: BarChart3, emoji: "📊" },
-  { to: "/gallery", label: "Image Gallery", icon: Image, emoji: "🖼️" },
+  
   { to: "/fields", label: "Fields", icon: Leaf, emoji: "🌿" },
-  { to: "/flights", label: "Flights", icon: Map, emoji: "🛰️" },
   { to: "/drones", label: "Drones", icon: Map, emoji: "📡" },
-  { to: "/detections/latest", label: "Detections", icon: BarChart3, emoji: "📡" },
+  { to: "/flights", label: "Flights", icon: Map, emoji: "🛰️" },
+  
+  { to: "/gallery", label: "Image Gallery", icon: Image, emoji: "🖼️" },
+  // { to: "/detections/latest", label: "Detections", icon: BarChart3, emoji: "📡" },
   { to: "/expert", label: "Ask an Expert", icon: MessageCircle, emoji: "💬", dot: true },
   { to: "/settings", label: "Settings", icon: Settings, emoji: "⚙️" },
 ];
