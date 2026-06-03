@@ -171,18 +171,16 @@ def require_role(required_role: str):
 # WEBSOCKET DEPENDENCIES
 # =====================================================
 
-async def verify_websocket_token(websocket: WebSocket) -> Dict:
+async def verify_websocket_token(websocket: WebSocket) -> Optional[Dict]:
     token = websocket.query_params.get("token")
     if not token:
-        await websocket.close(code=4001, reason="Missing token")
-        raise HTTPException(status_code=401, detail="Missing token")
+        return None
     try:
         payload = await verify_token(token)
         logger.debug(f"WebSocket authenticated: user={payload.get('sub')}")
         return payload
-    except HTTPException as e:
-        await websocket.close(code=4001, reason=e.detail)
-        raise
+    except HTTPException:
+        return None
 
 
 async def get_websocket_user_id(websocket: WebSocket) -> str:

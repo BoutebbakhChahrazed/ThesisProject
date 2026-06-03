@@ -12,7 +12,7 @@ from services.indices import (
     compute_health_score, get_stress_label,
     generate_heatmap_png
 )
-from services.inference import get_classifier
+from services.inference import predict_rgn  # ← replaces get_classifier
 from services import supabase_service
 
 logger = logging.getLogger(__name__)
@@ -48,16 +48,11 @@ def _load_image_as_bands(image_path: str) -> dict:
 async def process_image(
     image_path: str,
     user_id: str,
-    image_id: str,           # ← id from images table (already saved)
+    image_id: str,
     field_id: str = None,
     flight_id: str = None,
     drone_id: str = None,
 ) -> dict:
-    """
-    Full inference pipeline for one image.
-    Assumes the raw image is already uploaded and saved to images table.
-    Writes results to segmentations table.
-    """
     logger.info(f"Processing: {image_path}")
 
     if not os.path.exists(image_path):
@@ -77,7 +72,6 @@ async def process_image(
     health_score = compute_health_score(ndvi)
     stress_label = get_stress_label(health_score)
 
-    # Pixel-level stats
     total_pixels     = ndvi.size
     healthy_pixels   = int(np.sum(ndvi > 0.3))
     stressed_pixels  = int(np.sum(ndvi <= 0.3))
@@ -98,15 +92,18 @@ async def process_image(
             ((ndvi + 1) / 2 * 255).astype("uint8"), cv2.COLORMAP_JET
         ))
 
-    # Step 4 — Run AI model
+    # Step 4 — Run ViT model (4-channel RGN + NDVI)
+    # predict_rgn expects the raw image path and returns
+    # {"stress_class": str, "confidence": float, "health_score": float}
+    # Falls back to index-based result if the model is unavailable.
     try:
-        stacked    = np.stack([red, green, nir], axis=-1)
-        classifier = get_classifier(settings.MODEL_WEIGHTS_PATH)
-        prediction = classifier.predict(stacked)
+        prediction  = predict_rgn(image_path)
         final_class = prediction["stress_class"]
         confidence  = prediction["confidence"]
+        # Optionally override index-based health_score with model's probability-derived one
+        health_score = prediction.get("health_score", health_score)
     except Exception as e:
-        logger.warning(f"Model failed ({e}), using index-based fallback")
+        logger.warning(f"ViT model failed ({e}), using index-based fallback")
         final_class = stress_label
         confidence  = round(health_score / 100, 2)
 
@@ -142,7 +139,6 @@ async def process_image(
 
     saved_seg = await supabase_service.save_segmentation(seg_record)
 
-    # Step 8 — Broadcast to dashboard
     broadcast_payload = {
         **seg_record,
         "segmentation_id": saved_seg.get("id"),
@@ -152,7 +148,6 @@ async def process_image(
 
     logger.info(f"Done | stress={final_class} | health={health_score:.1f}% | confidence={confidence:.2f}")
 
-    # Cleanup heatmap temp file
     try:
         os.remove(heatmap_path)
     except:

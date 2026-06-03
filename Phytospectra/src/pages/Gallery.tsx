@@ -26,7 +26,10 @@ type ImageRow = {
 type SegResult = {
   image_id: string;
   mask_url: string;
-  label_counts: Record<string, number>;
+  label_counts?: Record<string, number>;  // optional — not always stored
+  stress_class?: string;
+  health_score?: number;
+  health_percentage?: number;
   cached?: boolean;
 };
 
@@ -94,10 +97,14 @@ async function resolveSignedUrls(imgs: ImageRow[]): Promise<ImageRow[]> {
 
 // ── LabelBar ────────────────────────────────────────────────────────────────
 
-function LabelBar({ counts }: { counts: Record<string, number> }) {
-  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+function LabelBar({ counts }: { counts?: Record<string, number> }) {
+  // Guard: counts may be undefined/null when loaded from cache
+  if (!counts) return null;
+  const entries = Object.entries(counts);
+  if (entries.length === 0) return null;
+  const total = entries.reduce((a, [, b]) => a + b, 0);
   if (total === 0) return null;
-  const sorted = Object.entries(counts).sort(([, a], [, b]) => b - a);
+  const sorted = entries.sort(([, a], [, b]) => b - a);
   return (
     <div className="mt-2 space-y-1">
       {/* Stacked bar */}
@@ -122,6 +129,27 @@ function LabelBar({ counts }: { counts: Record<string, number> }) {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+// ── HealthBadge ─────────────────────────────────────────────────────────────
+
+function HealthBadge({ result }: { result: SegResult }) {
+  const pct   = result.health_percentage ?? result.health_score;
+  const cls   = result.stress_class;
+  if (pct == null && !cls) return null;
+
+  const colour =
+    cls === "healthy"  ? "text-emerald-700 bg-emerald-50 border-emerald-200" :
+    cls === "stressed" ? "text-red-700 bg-red-50 border-red-200" :
+                         "text-amber-700 bg-amber-50 border-amber-200";
+
+  return (
+    <div className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full border ${colour}`}>
+      {cls === "healthy" ? "🌱" : "⚠️"}
+      {cls && <span className="capitalize">{cls}</span>}
+      {pct != null && <span>{pct.toFixed(1)}%</span>}
     </div>
   );
 }
@@ -301,19 +329,25 @@ function ImageGrid({
         })}
       </div>
 
-      {/* Per-image label bars when segmentation is done */}
+      {/* Per-image breakdown when segmentation is done */}
       {segResults && segResults.length > 0 && (
-        <div className="space-y-2 border-t border-border/30 pt-3">
+        <div className="space-y-3 border-t border-border/30 pt-3">
           <p className="text-xs font-medium text-muted-foreground">Segmentation breakdown</p>
           {images.map((img) => {
             const seg = maskByImageId[img.id];
             if (!seg) return null;
             return (
-              <div key={img.id} className="space-y-0.5">
-                <p className="text-[10px] text-muted-foreground truncate">
-                  {img.storage_path.split("/").pop()}
-                </p>
-                <LabelBar counts={seg.label_counts} />
+              <div key={img.id} className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <p className="text-[10px] text-muted-foreground truncate max-w-[60%]">
+                    {img.storage_path.split("/").pop()}
+                  </p>
+                  <HealthBadge result={seg} />
+                </div>
+                {/* Only render LabelBar if label_counts exists and is non-empty */}
+                {seg.label_counts && Object.keys(seg.label_counts).length > 0 && (
+                  <LabelBar counts={seg.label_counts} />
+                )}
               </div>
             );
           })}
@@ -326,8 +360,8 @@ function ImageGrid({
 // ── Lightbox ───────────────────────────────────────────────────────────────
 
 function Lightbox({ image, onClose }: { image: SelectedImage; onClose: () => void }) {
-  const hasMask = Boolean(image.maskUrl);
-  const [view, setView] = useState<"original" | "mask">("original");
+  // Only show mask if it's a real URL (not local:// fallback)
+  const hasMask = Boolean(image.maskUrl) && !image.maskUrl?.startsWith("local://");
 
   return (
     <div
@@ -344,31 +378,9 @@ function Lightbox({ image, onClose }: { image: SelectedImage; onClose: () => voi
             <h3 className="font-display font-bold">{image.fieldName}</h3>
             <p className="text-xs text-muted-foreground">{image.flightLabel}</p>
           </div>
-          <div className="flex items-center gap-2">
-            {hasMask && (
-              <div className="flex rounded-lg border border-border overflow-hidden text-xs font-medium">
-                <button
-                  onClick={() => setView("original")}
-                  className={`px-3 py-1.5 transition-colors ${
-                    view === "original" ? "bg-foreground text-background" : "hover:bg-muted"
-                  }`}
-                >
-                  Original
-                </button>
-                <button
-                  onClick={() => setView("mask")}
-                  className={`px-3 py-1.5 transition-colors ${
-                    view === "mask" ? "bg-foreground text-background" : "hover:bg-muted"
-                  }`}
-                >
-                  Mask
-                </button>
-              </div>
-            )}
-            <button onClick={onClose} className="p-2 rounded-lg hover:bg-muted">
-              <X className="h-4 w-4" />
-            </button>
-          </div>
+          <button onClick={onClose} className="p-2 rounded-lg hover:bg-muted">
+            <X className="h-4 w-4" />
+          </button>
         </div>
 
         {/* Side-by-side or single image */}
@@ -403,7 +415,6 @@ function Lightbox({ image, onClose }: { image: SelectedImage; onClose: () => voi
               </div>
             </div>
           ) : (
-            /* No mask yet – single image */
             image.publicUrl ? (
               <img
                 src={image.publicUrl}
@@ -488,18 +499,33 @@ export default function Gallery() {
         setFlights(flightsData);
         setImages(withUrls);
 
-        // Pre-load any existing segmentation results
+        // Pre-load any existing segmentation results — never throws, just skips on error
         const segInit: Record<string, SegState> = {};
-        await Promise.all(
+        await Promise.allSettled(
           flightsData.map(async (fl) => {
             try {
               const res  = await fetch(`${base}/api/segment/flight/${fl.id}`, { headers });
               if (!res.ok) return;
               const json = await res.json();
-              if (json.results?.length > 0) {
-                segInit[fl.id] = { status: "done", results: json.results };
+              const results: SegResult[] = (json.results ?? []).map((r: any) => ({
+                image_id:         r.image_id,
+                mask_url:         r.mask_url ?? "",
+                label_counts:     r.label_counts ?? undefined,
+                stress_class:     r.stress_class ?? undefined,
+                health_score:     r.health_score ?? undefined,
+                health_percentage: r.health_percentage ?? undefined,
+                cached:           true,
+              }));
+              // Only mark as done if there are real results with valid mask URLs
+              const valid = results.filter(
+                (r) => r.mask_url && !r.mask_url.startsWith("local://")
+              );
+              if (valid.length > 0) {
+                segInit[fl.id] = { status: "done", results: valid };
               }
-            } catch { /* ignore */ }
+            } catch {
+              // silently ignore — flight just shows "Run Segmentation" button
+            }
           })
         );
         if (active) setSegStates(segInit);
@@ -528,9 +554,18 @@ export default function Gallery() {
         throw new Error(msg || `HTTP ${res.status}`);
       }
       const json = await res.json();
+      const results: SegResult[] = (json.results ?? []).map((r: any) => ({
+        image_id:          r.image_id,
+        mask_url:          r.mask_url ?? "",
+        label_counts:      r.label_counts ?? undefined,
+        stress_class:      r.stress_class ?? undefined,
+        health_score:      r.health_score ?? undefined,
+        health_percentage: r.health_percentage ?? undefined,
+        cached:            r.cached ?? false,
+      }));
       setSegStates((prev) => ({
         ...prev,
-        [flightId]: { status: "done", results: json.results ?? [] },
+        [flightId]: { status: "done", results },
       }));
     } catch (e) {
       setSegStates((prev) => ({
