@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from core.config import settings
 from core.watcher import start_watcher
 from routers import websocket, flights, detections, health, analyze
-from routers import uploads, fields, drones, images, camera
+from routers import uploads, fields, drones, images, camera, esp32
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,3 +56,4 @@ app.include_router(drones.router,     prefix="/api")
 app.include_router(analyze.router,    prefix="/api")
 app.include_router(images.router,     prefix="/api")
 app.include_router(camera.router,     prefix="/api")
+app.include_router(esp32.router,      prefix="/api")

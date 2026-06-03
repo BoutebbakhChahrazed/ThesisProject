@@ -50,7 +50,19 @@ export default function Drones() {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<NewDrone>(blank);
+  const [editDraft, setEditDraft] = useState<{
+    drone_name: string;
+    drone_model: string;
+    esp32_device_id: string;
+    multispectral_camera: string;
+  }>({
+    drone_name: "",
+    drone_model: "",
+    esp32_device_id: "",
+    multispectral_camera: "MAPIR Survey3W",
+  });
 
   const backendBaseUrl = getBackendBaseUrl();
 
@@ -128,6 +140,54 @@ export default function Drones() {
       setDraft(blank);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to create drone");
+    } finally {
+      setPending(false);
+    }
+  };
+
+  const startEdit = (d: Drone) => {
+    setEditingId(d.id);
+    setEditDraft({
+      drone_name: d.drone_name,
+      drone_model: d.drone_model || "",
+      esp32_device_id: d.esp32_device_id || "",
+      multispectral_camera: d.multispectral_camera || "MAPIR Survey3W",
+    });
+    setCreating(false);
+  };
+
+  const onSaveEdit = async (drone_id: string) => {
+    if (!editDraft.drone_name.trim()) {
+      setError("Drone name is required");
+      return;
+    }
+    setPending(true);
+    setError(null);
+    try {
+      const token = await getTokenFromSession();
+      const res = await fetch(`${backendBaseUrl}/api/drones/${drone_id}`, {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          drone_name: editDraft.drone_name.trim(),
+          drone_model: editDraft.drone_model.trim() || null,
+          esp32_device_id: editDraft.esp32_device_id.trim() || null,
+          multispectral_camera: editDraft.multispectral_camera.trim() || "MAPIR Survey3W",
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const updated = (await res.json()) as Drone;
+      const matchedField = fields.find((f) => f.id === updated.field_id);
+      setItems((prev) =>
+        prev.map((x) =>
+          x.id === drone_id
+            ? { ...updated, field_name: matchedField?.field_name ?? x.field_name }
+            : x
+        )
+      );
+      setEditingId(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to update drone");
     } finally {
       setPending(false);
     }
@@ -233,7 +293,7 @@ export default function Drones() {
                   <Input
                     value={draft.esp32_device_id}
                     onChange={(e) => setDraft((d) => ({ ...d, esp32_device_id: e.target.value }))}
-                    placeholder="e.g. esp32-abc123"
+                    placeholder="esp32-mapir-01 (must match firmware DEVICE_ID)"
                   />
                 </div>
 
@@ -267,20 +327,69 @@ export default function Drones() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {items.map((d) => (
           <Card key={d.id} className="p-5 space-y-3">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <div className="font-semibold">{d.drone_name}</div>
-                <div className="text-xs text-muted-foreground">Model: {d.drone_model || "—"}</div>
-              </div>
-              <Button variant="destructive" size="sm" onClick={() => onDelete(d.id)} disabled={pending}>
-                Delete
-              </Button>
-            </div>
-            <div className="text-xs text-muted-foreground space-y-0.5">
-              <div>📍 Field: <span className="font-medium text-foreground">{d.field_name || d.field_id || "—"}</span></div>
-              <div>📷 Camera: {d.multispectral_camera || "—"}</div>
-              <div>🔌 ESP32: {d.esp32_device_id || "—"}</div>
-            </div>
+            {editingId === d.id ? (
+              <>
+                <div className="font-semibold text-sm">Edit drone</div>
+                <div className="space-y-2">
+                  <Label>Drone name</Label>
+                  <Input
+                    value={editDraft.drone_name}
+                    onChange={(e) => setEditDraft((x) => ({ ...x, drone_name: e.target.value }))}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>ESP32 Device ID *</Label>
+                  <Input
+                    value={editDraft.esp32_device_id}
+                    onChange={(e) => setEditDraft((x) => ({ ...x, esp32_device_id: e.target.value }))}
+                    placeholder="esp32-mapir-01"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Must match <code className="text-foreground">DEVICE_ID</code> in your ESP32 sketch exactly.
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  <Button size="sm" onClick={() => onSaveEdit(d.id)} disabled={pending}>
+                    {pending ? "Saving..." : "Save"}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setEditingId(null)}
+                    disabled={pending}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="font-semibold">{d.drone_name}</div>
+                    <div className="text-xs text-muted-foreground">Model: {d.drone_model || "—"}</div>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button variant="outline" size="sm" onClick={() => startEdit(d)} disabled={pending}>
+                      Edit
+                    </Button>
+                    <Button variant="destructive" size="sm" onClick={() => onDelete(d.id)} disabled={pending}>
+                      Delete
+                    </Button>
+                  </div>
+                </div>
+                <div className="text-xs text-muted-foreground space-y-0.5">
+                  <div>📍 Field: <span className="font-medium text-foreground">{d.field_name || d.field_id || "—"}</span></div>
+                  <div>📷 Camera: {d.multispectral_camera || "—"}</div>
+                  <div>
+                    🔌 ESP32:{" "}
+                    <span className={d.esp32_device_id ? "font-medium text-foreground" : "text-amber-600"}>
+                      {d.esp32_device_id || "Not set — tap Edit"}
+                    </span>
+                  </div>
+                </div>
+              </>
+            )}
           </Card>
         ))}
         {!items.length && !pending && (
