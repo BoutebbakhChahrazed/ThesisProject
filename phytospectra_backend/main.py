@@ -51,3 +51,4 @@ app.include_router(esp32.router,      prefix="/api")
 app.include_router(Segmentflight.router, prefix="/api")  
 app.include_router(Chat.router, prefix="/api")
 app.include_router(alert.router, prefix="/api")
+
