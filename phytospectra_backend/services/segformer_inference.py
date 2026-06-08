@@ -12,6 +12,12 @@ V5.1 PATCH — Global NDVI background removal:
   - Pixels with NDVI < NDVI_VEGETATION_THR are treated as background (soil/shadow/sky)
   - Background pixels are set to IGNORE_LABEL in the final class map
   - Applied after tiling inference, using the original raw float array
+
+V5.2 PATCH — Largest-component background filtering:
+  - After NDVI masking, only the single largest connected background region is kept
+  - Smaller isolated background blobs are reassigned to the nearest vegetation class
+    (healthy=0 or stressed=1) based on whichever dominates their local surroundings
+  - Eliminates noise specks that pass the NDVI threshold but are not true background
 """
 
 from __future__ import annotations
@@ -249,12 +255,81 @@ def _apply_ndvi_background_mask(
     return masked
 
 
+# ── V5.2 PATCH — Largest-component background filtering ──────────────────────
+
+def _keep_largest_background(class_map: np.ndarray) -> np.ndarray:
+    """
+    Retain only the single largest connected region of IGNORE_LABEL (background).
+    All smaller isolated background blobs are reassigned to the dominant vegetation
+    class (healthy=0 or stressed=1) among their immediate 8-connected neighbours.
+
+    This removes noise specks that passed the NDVI threshold but are clearly not
+    part of the true continuous background region.
+
+    Args:
+        class_map : H×W uint8 array where IGNORE_LABEL=255 marks background pixels
+
+    Returns:
+        Updated class map (H×W uint8) with small background blobs reassigned.
+    """
+    from scipy.ndimage import label as ndi_label
+
+    binary = (class_map == IGNORE_LABEL).astype(np.uint8)
+    labeled, num_features = ndi_label(binary)
+
+    if num_features <= 1:
+        # Zero or one background region — nothing to clean up
+        return class_map
+
+    # Identify the largest connected background component
+    sizes       = np.bincount(labeled.ravel())
+    sizes[0]    = 0                          # index-0 is the non-background label
+    largest_lbl = int(sizes.argmax())
+
+    # Build mask of small (non-largest) background blobs
+    small_bg = (labeled > 0) & (labeled != largest_lbl)
+    if not small_bg.any():
+        return class_map
+
+    result = class_map.copy()
+
+    # For each small blob, pick the dominant vegetation class in its neighbourhood.
+    # We dilate the blob by 3 px and sample the surrounding vegetation pixels.
+    from scipy.ndimage import binary_dilation
+
+    small_labels = [lbl for lbl in range(1, num_features + 1) if lbl != largest_lbl]
+    struct       = np.ones((3, 3), dtype=bool)   # 8-connectivity
+
+    for lbl in small_labels:
+        blob      = labeled == lbl
+        dilated   = binary_dilation(blob, structure=struct, iterations=3)
+        neighbors = dilated & ~blob & (class_map != IGNORE_LABEL)
+
+        if neighbors.any():
+            neighbor_vals = class_map[neighbors]
+            # Majority vote among valid vegetation neighbours
+            counts       = np.bincount(neighbor_vals.astype(np.int64), minlength=2)
+            replacement  = int(counts[:2].argmax())
+        else:
+            # No vegetation neighbours found — default to healthy (0)
+            replacement = 0
+
+        result[blob] = replacement
+
+    removed = int(small_bg.sum())
+    logger.debug(
+        f"Largest-background filter: {num_features - 1} small blob(s) removed, "
+        f"{removed:,} pixels reassigned"
+    )
+    return result
+
+
 # ── Post-processing helpers ───────────────────────────────────────────────────
 
 def _colourise(class_map: np.ndarray) -> Image.Image:
     """
     Colourise a class map.
-    IGNORE_LABEL pixels → black (background).
+    IGNORE_LABEL pixels → white (background).
     """
     H, W = class_map.shape
     rgb  = np.full((H, W, 3), 255, dtype=np.uint8)   # white by default = background
@@ -286,16 +361,16 @@ def _compute_stats(class_map: np.ndarray) -> dict[str, Any]:
     health_score = health_pct   # 0–100 float, same convention as ViT pipeline
 
     return {
-        "healthy_pixel_count":   healthy,
-        "stressed_pixel_count":  stressed,
+        "healthy_pixel_count":    healthy,
+        "stressed_pixel_count":   stressed,
         "background_pixel_count": int((class_map == IGNORE_LABEL).sum()),
         "vegetation_pixel_count": total_veg,
-        "health_percentage":     health_pct,
-        "stressed_percentage":   stressed_pct,
-        "health_score":          health_score,
-        "stress_class":          "healthy" if healthy >= stressed else "stressed",
-        "confidence":            round(max(healthy, stressed) / total_veg, 4) if total_veg > 0 else 0.0,
-        "ndvi_threshold_used":   NDVI_VEGETATION_THR,
+        "health_percentage":      health_pct,
+        "stressed_percentage":    stressed_pct,
+        "health_score":           health_score,
+        "stress_class":           "healthy" if healthy >= stressed else "stressed",
+        "confidence":             round(max(healthy, stressed) / total_veg, 4) if total_veg > 0 else 0.0,
+        "ndvi_threshold_used":    NDVI_VEGETATION_THR,
     }
 
 
@@ -307,7 +382,7 @@ def run_segformer(
 ) -> dict[str, Any]:
     """
     Run full SegFormer segmentation on a single image file,
-    with global NDVI-based background removal.
+    with global NDVI-based background removal and largest-component filtering.
 
     Args:
         image_path     : path to the input image (TIFF or standard format)
@@ -317,7 +392,7 @@ def run_segformer(
     Returns:
         {
             "class_map":              np.ndarray (H×W uint8, 255=background),
-            "mask_image":             PIL.Image  (RGB colourised, black=background),
+            "mask_image":             PIL.Image  (RGB colourised, white=background),
             "label_counts":           {"0": int, "1": int, "255": int},
             "healthy_pixel_count":    int,
             "stressed_pixel_count":   int,
@@ -337,16 +412,19 @@ def run_segformer(
     # 2. Tiling inference → raw class map
     class_map = _segment_pil(pil_img)
 
-    # 3. ── V5.1 PATCH: mask out background pixels globally using NDVI ─────────
+    # 3. V5.1 PATCH: mask out background pixels globally using NDVI
     class_map = _apply_ndvi_background_mask(class_map, ndvi, threshold=ndvi_threshold)
 
-    # 4. Colourise + stats
+    # 4. V5.2 PATCH: discard small background blobs, keep only the dominant region
+    class_map = _keep_largest_background(class_map)
+
+    # 5. Colourise + stats
     mask_image = _colourise(class_map)
     stats      = _compute_stats(class_map)
 
     return {
-        "class_map":   class_map,
-        "mask_image":  mask_image,
+        "class_map":    class_map,
+        "mask_image":   mask_image,
         "label_counts": _label_counts(class_map),
         **stats,
     }

@@ -378,3 +378,55 @@ async def segment_single_image(
         tmp_dir=tmp_dir,
     )
     return {"status": "success", **result}
+
+async def auto_segment_flight(flight_id: str, user_id: str) -> None:
+    """
+    Called automatically after flight images are uploaded.
+    Silently runs segmentation; errors are logged but never raised.
+    """
+    logger.info(f"auto_segment_flight: starting | flight_id={flight_id} user_id={user_id}")
+    client = supabase_service.get_supabase()
+    if not client:
+        logger.warning("auto_segment_flight: Supabase unavailable, skipping")
+        return
+
+    try:
+        img_res = (
+            client.table("images")
+            .select("id, storage_path, bucket_name, flight_id, field_id, drone_id")
+            .eq("flight_id", flight_id)
+            .eq("user_id", user_id)
+            .execute()
+        )
+        flight_images: list[dict] = img_res.data or []
+
+        if not flight_images:
+            logger.warning(f"auto_segment_flight: no images found for flight {flight_id}")
+            return
+
+        tmp_dir = os.path.join(settings.OUTPUT_FOLDER, "tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        ok = 0
+        for img_row in flight_images:
+            try:
+                await _process_one_image(
+                    image_row=img_row,
+                    user_id=user_id,
+                    force=False,      # skip images that are already cached
+                    tmp_dir=tmp_dir,
+                )
+                ok += 1
+            except Exception as e:
+                logger.exception(
+                    f"auto_segment_flight: failed on image {img_row.get('id')}: {e}"
+                )
+
+        logger.info(
+            f"auto_segment_flight: done | flight_id={flight_id} "
+            f"{ok}/{len(flight_images)} succeeded"
+        )
+    except Exception as e:
+        logger.exception(
+            f"auto_segment_flight: unexpected error for flight {flight_id}: {e}"
+        )

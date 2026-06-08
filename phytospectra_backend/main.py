@@ -8,6 +8,8 @@ from core.watcher import start_watcher
 from routers import websocket, flights, detections, health, analyze
 from routers import uploads, fields, drones, images, camera, esp32
 from routers import Segmentflight # ← ADD
+from routers import Chat
+from routers import alert
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,4 +48,6 @@ app.include_router(analyze.router,    prefix="/api")
 app.include_router(images.router,     prefix="/api")
 app.include_router(camera.router,     prefix="/api")
 app.include_router(esp32.router,      prefix="/api")
-app.include_router(Segmentflight.router, prefix="/api")  # ← ADD
+app.include_router(Segmentflight.router, prefix="/api")  
+app.include_router(Chat.router, prefix="/api")
+app.include_router(alert.router, prefix="/api")

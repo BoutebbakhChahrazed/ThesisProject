@@ -52,7 +52,7 @@ export default function Segmentations() {
 
   return (
     <div className="space-y-4">
-      <PageHeader title="🔥 Segmentations" subtitle={flight_id ? `Flight: ${flight_id}` : "Select a flight"} gradient="gradient-analytics" />
+      <PageHeader title=" Segmentations" subtitle={flight_id ? `Flight: ${flight_id}` : "Select a flight"} gradient="gradient-analytics" />
 
       {error ? (
         <div className="rounded-xl border border-stress-severe/30 bg-stress-severe/10 text-stress-severe px-4 py-3 text-sm">

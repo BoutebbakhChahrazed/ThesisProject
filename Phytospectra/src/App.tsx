@@ -8,9 +8,6 @@ import NotFound from "./pages/NotFound.tsx";
 import LiveMonitor from "./pages/LiveMonitor.tsx";
 import FarmerWeather from "./pages/FarmerWeather.tsx";
 import FarmerAnalyze from "./pages/FarmerAnalyze.tsx";
-
-
-
 import Analytics from "./pages/Analytics.tsx";
 import Gallery from "./pages/Gallery.tsx";
 import Expert from "./pages/Expert.tsx";
@@ -23,6 +20,7 @@ import Drones from "./pages/Drones.tsx";
 import Images from "./pages/Images.tsx";
 import Segmentations from "./pages/Segmentations.tsx";
 import LatestDetections from "./pages/LatestDetections.tsx";
+import ChatBot from "./pages/ChatBot.tsx";
 
 import { Layout } from "./components/Layout.tsx";
 import Landing from "./pages/Landing.tsx";
@@ -30,30 +28,45 @@ import { useWebSocket } from "./hooks/useWebSocket";
 import { AuthProvider, useAuth } from "./hooks/useAuth";
 import "leaflet/dist/leaflet.css";
 
-// const queryClient = new QueryClient();
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      retry: 3,              // retry failed requests 3 times
-      retryDelay: 1000,      // wait 1s between retries
+      retry: 3,
+      retryDelay: 1000,
       staleTime: 0,
     },
   },
 });
 
-const ProtectedShell = ({ wsUrl, setWsUrl, threshold, setThreshold, wsConnected }: {
-  wsUrl: string; setWsUrl: (s: string) => void; threshold: number; setThreshold: (n: number) => void; wsConnected: boolean;
+const ProtectedShell = ({
+  wsUrl,
+  setWsUrl,
+  threshold,
+  setThreshold,
+  wsConnected,
+}: {
+  wsUrl: string;
+  setWsUrl: (s: string) => void;
+  threshold: number;
+  setThreshold: (n: number) => void;
+  wsConnected: boolean;
 }) => {
   const { user, role, loading } = useAuth();
+
   if (loading) {
-    return <div className="min-h-screen flex items-center justify-center bg-background text-muted-foreground text-sm">Loading...</div>;
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background text-muted-foreground text-sm">
+        Loading...
+      </div>
+    );
   }
+
   if (!user) return <Navigate to="/auth" replace />;
 
   const home = role === "agronomist" ? "/expert-desk" : "/live";
 
   return (
-    <Layout wsConnected={wsConnected} dbConnected={true}>
+    <Layout wsConnected={wsConnected} dbConnected={true} wsUrl={wsUrl}>
       <Routes>
         <Route path="/" element={<Navigate to={home} replace />} />
         <Route path="/live" element={role === "agronomist" ? <Navigate to="/expert-desk" replace /> : <LiveMonitor live={true} />} />
@@ -64,19 +77,15 @@ const ProtectedShell = ({ wsUrl, setWsUrl, threshold, setThreshold, wsConnected 
         <Route path="/settings" element={<SettingsPage wsUrl={wsUrl} setWsUrl={setWsUrl} threshold={threshold} setThreshold={setThreshold} />} />
         <Route path="/farmer-weather" element={role === "farmer" ? <FarmerWeather /> : <Navigate to="/live" replace />} />
         <Route path="/farmer-analyze" element={role === "farmer" ? <FarmerAnalyze /> : <Navigate to="/live" replace />} />
-
+        <Route path="/chat" element={<ChatBot />} />
         <Route path="/fields" element={<Fields />} />
         <Route path="/flights" element={<Flights />} />
         <Route path="/drones" element={<Drones />} />
         <Route path="/images" element={<Images />} />
         <Route path="/segmentations/:flight_id" element={<Segmentations />} />
         <Route path="/detections/latest" element={<LatestDetections />} />
-
         <Route path="*" element={<NotFound />} />
-
-
       </Routes>
-
     </Layout>
   );
 };
@@ -96,10 +105,18 @@ const App = () => {
             <Routes>
               <Route path="/auth" element={<AuthPage />} />
               <Route path="/" element={<Landing />} />
-              <Route path="*" element={
-
-                <ProtectedShell wsUrl={wsUrl} setWsUrl={setWsUrl} threshold={threshold} setThreshold={setThreshold} wsConnected={connected} />
-              } />
+              <Route
+                path="*"
+                element={
+                  <ProtectedShell
+                    wsUrl={wsUrl}
+                    setWsUrl={setWsUrl}
+                    threshold={threshold}
+                    setThreshold={setThreshold}
+                    wsConnected={connected}
+                  />
+                }
+              />
             </Routes>
           </AuthProvider>
         </BrowserRouter>
@@ -107,6 +124,5 @@ const App = () => {
     </QueryClientProvider>
   );
 };
-
 
 export default App;

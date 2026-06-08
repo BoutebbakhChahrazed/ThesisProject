@@ -6,6 +6,15 @@ import os
 logger = logging.getLogger(__name__)
 _client: Client = None
 
+# Flights table uses created_at in Supabase; expose flight_date for the frontend.
+FLIGHTS_ORDER_COLUMN = "created_at"
+
+
+def normalize_flight_row(row: dict) -> dict:
+    if row and not row.get("flight_date"):
+        row["flight_date"] = row.get("created_at")
+    return row
+
 
 def get_supabase() -> Client:
     global _client
@@ -234,21 +243,30 @@ async def get_segmentations(
     client = get_supabase()
     if not client:
         return []
-    try:
-        query = (
-            client.table("segmentations")
-            .select("*, images(storage_path, gps, captured_at)")
-            .eq("user_id", user_id)
-            .limit(limit)
-        )
-        if field_id:
-            query = query.eq("field_id", field_id)
-        if flight_id:
-            query = query.eq("flight_id", flight_id)
-        return query.order("processed_at", desc=True).execute().data or []
-    except Exception as e:
-        logger.error(f"Failed to fetch segmentations: {e}")
-        return []
+    # Try embedded images join; fall back if FK or column names differ in DB.
+    select_variants = [
+        "*, images(storage_path, gps, uploaded_at)",
+        "*, images(storage_path, gps)",
+        "*",
+    ]
+    for sel in select_variants:
+        try:
+            query = (
+                client.table("segmentations")
+                .select(sel)
+                .eq("user_id", user_id)
+                .limit(limit)
+            )
+            if field_id:
+                query = query.eq("field_id", field_id)
+            if flight_id:
+                query = query.eq("flight_id", flight_id)
+            data = query.order("processed_at", desc=True).execute().data or []
+            return data
+        except Exception as e:
+            logger.warning(f"segmentations select={sel!r} failed: {e}")
+            continue
+    return []
 
 
 # ─────────────────────────────────────────────
@@ -283,18 +301,26 @@ async def get_flights(user_id: str, field_id: str = None) -> list:
     client = get_supabase()
     if not client:
         return []
-    try:
-        query = (
-            client.table("flights")
-            .select("*, fields(field_name), drones(drone_name)")
-            .eq("user_id", user_id)
-        )
-        if field_id:
-            query = query.eq("field_id", field_id)
-        return query.order("flight_date", desc=True).execute().data or []
-    except Exception as e:
-        logger.error(f"Failed to fetch flights: {e}")
-        return []
+    select_variants = [
+        "*, fields(field_name), drones(drone_name)",
+        "*, fields(field_name)",
+        "*",
+    ]
+    for sel in select_variants:
+        try:
+            query = (
+                client.table("flights")
+                .select(sel)
+                .eq("user_id", user_id)
+            )
+            if field_id:
+                query = query.eq("field_id", field_id)
+            rows = query.order(FLIGHTS_ORDER_COLUMN, desc=True).execute().data or []
+            return [normalize_flight_row(r) for r in rows]
+        except Exception as e:
+            logger.warning(f"get_flights select={sel!r} failed: {e}")
+            continue
+    return []
 
 
 # ─────────────────────────────────────────────
@@ -304,16 +330,26 @@ async def get_flights(user_id: str, field_id: str = None) -> list:
 async def get_fields(user_id: str) -> list:
     client = get_supabase()
     if not client:
-        return []
-    try:
-        return (
-            client.table("fields")
-            .select("*")
-            .eq("user_id", user_id)
-            .order("created_at", desc=True)
-            .execute()
-            .data or []
-        )
-    except Exception as e:
-        logger.error(f"Failed to fetch fields: {e}")
-        return []
+        raise RuntimeError("Supabase client not configured (check SUPABASE_URL and SUPABASE_KEY in backend .env)")
+
+    last_error: Exception | None = None
+    attempts = [
+        ("*", "created_at"),
+        ("*", "id"),
+        ("*", None),
+        (
+            "id, user_id, field_name, crop_type, latitude, longitude, area_hectares, boundary",
+            None,
+        ),
+    ]
+    for select_cols, order_col in attempts:
+        try:
+            query = client.table("fields").select(select_cols).eq("user_id", user_id)
+            if order_col:
+                query = query.order(order_col, desc=True)
+            return query.execute().data or []
+        except Exception as e:
+            last_error = e
+            logger.warning(f"get_fields failed select={select_cols!r} order={order_col!r}: {e}")
+
+    raise RuntimeError(f"Could not load fields from Supabase: {last_error}")
