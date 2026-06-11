@@ -21,10 +21,11 @@ import Images from "./pages/Images.tsx";
 import Segmentations from "./pages/Segmentations.tsx";
 import LatestDetections from "./pages/LatestDetections.tsx";
 import ChatBot from "./pages/ChatBot.tsx";
-
+import Alerts from "./pages/Alerts.tsx";
+import { useAgronomistLocation } from "@/hooks/useAgronomistLocation";
 import { Layout } from "./components/Layout.tsx";
 import Landing from "./pages/Landing.tsx";
-import { useWebSocket } from "./hooks/useWebSocket";
+import { useWebSocket, StressAlertMessage } from "./hooks/useWebSocket";
 import { AuthProvider, useAuth } from "./hooks/useAuth";
 import "leaflet/dist/leaflet.css";
 
@@ -44,14 +45,21 @@ const ProtectedShell = ({
   threshold,
   setThreshold,
   wsConnected,
+  lastAlert,
+  unreadAlerts,
+  clearUnread,
 }: {
   wsUrl: string;
   setWsUrl: (s: string) => void;
   threshold: number;
   setThreshold: (n: number) => void;
   wsConnected: boolean;
+  lastAlert: StressAlertMessage | null;
+  unreadAlerts: number;
+  clearUnread: () => void;
 }) => {
   const { user, role, loading } = useAuth();
+  useAgronomistLocation();
 
   if (loading) {
     return (
@@ -66,7 +74,14 @@ const ProtectedShell = ({
   const home = role === "agronomist" ? "/expert-desk" : "/live";
 
   return (
-    <Layout wsConnected={wsConnected} dbConnected={true} wsUrl={wsUrl}>
+    <Layout
+      wsConnected={wsConnected}
+      dbConnected={true}
+      wsUrl={wsUrl}
+      lastAlert={lastAlert}
+      unreadAlerts={unreadAlerts}
+      clearUnread={clearUnread}
+    >
       <Routes>
         <Route path="/" element={<Navigate to={home} replace />} />
         <Route path="/live" element={role === "agronomist" ? <Navigate to="/expert-desk" replace /> : <LiveMonitor live={true} />} />
@@ -84,6 +99,7 @@ const ProtectedShell = ({
         <Route path="/images" element={<Images />} />
         <Route path="/segmentations/:flight_id" element={<Segmentations />} />
         <Route path="/detections/latest" element={<LatestDetections />} />
+        <Route path="/alerts" element={<Alerts />} />
         <Route path="*" element={<NotFound />} />
       </Routes>
     </Layout>
@@ -93,14 +109,14 @@ const ProtectedShell = ({
 const App = () => {
   const [wsUrl, setWsUrl] = useState("");
   const [threshold, setThreshold] = useState(55);
-  const { connected } = useWebSocket(wsUrl || null);
+  const { connected, lastAlert, unreadAlerts, clearUnread } = useWebSocket(wsUrl || null);
 
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <Toaster />
         <Sonner />
-        <BrowserRouter>
+        <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
           <AuthProvider>
             <Routes>
               <Route path="/auth" element={<AuthPage />} />
@@ -114,6 +130,9 @@ const App = () => {
                     threshold={threshold}
                     setThreshold={setThreshold}
                     wsConnected={connected}
+                    lastAlert={lastAlert}
+                    unreadAlerts={unreadAlerts}
+                    clearUnread={clearUnread}
                   />
                 }
               />

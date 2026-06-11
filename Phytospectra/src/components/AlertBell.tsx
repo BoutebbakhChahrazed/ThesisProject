@@ -1,4 +1,3 @@
-// components/AlertBell.tsx
 import { useRef, useEffect, useState } from "react";
 import type { StressAlertMessage } from "@/hooks/useWebSocket";
 
@@ -16,7 +15,6 @@ export function AlertBell({ lastAlert, unreadAlerts, clearUnread }: Props) {
   const [history, setHistory] = useState<StressAlertMessage[]>([]);
   const panelRef              = useRef<HTMLDivElement>(null);
 
-  // Accumulate alerts into local history
   useEffect(() => {
     if (!lastAlert) return;
     setHistory(prev =>
@@ -26,12 +24,10 @@ export function AlertBell({ lastAlert, unreadAlerts, clearUnread }: Props) {
     );
   }, [lastAlert]);
 
-  // Clear badge when panel opens
   useEffect(() => {
     if (open) clearUnread();
   }, [open, clearUnread]);
 
-  // Close on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (panelRef.current && !panelRef.current.contains(e.target as Node)) {

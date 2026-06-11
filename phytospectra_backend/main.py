@@ -10,6 +10,8 @@ from routers import uploads, fields, drones, images, camera, esp32
 from routers import Segmentflight # ← ADD
 from routers import Chat
 from routers import alert
+from routers import expert_chat   
+from routers import profile  
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,10 +31,12 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+from fastapi.middleware.cors import CORSMiddleware
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=["*"],  # or ["http://10.0.31.38:8080"] to be specific
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -50,5 +54,6 @@ app.include_router(camera.router,     prefix="/api")
 app.include_router(esp32.router,      prefix="/api")
 app.include_router(Segmentflight.router, prefix="/api")  
 app.include_router(Chat.router, prefix="/api")
-app.include_router(alert.router, prefix="/api")
-
+app.include_router(alert.router, prefix="/api")       # add this
+app.include_router(expert_chat.router, prefix="/api")
+app.include_router(profile.router, prefix="/api")

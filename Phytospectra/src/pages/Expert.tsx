@@ -1,86 +1,316 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { PageHeader } from "@/components/PageHeader";
-import { X, Send } from "lucide-react";
+import { X, Send, Loader2, WifiOff, Users } from "lucide-react";
+import { useExpertChat } from "@/hooks/useExpertChat";
+import { useAuth } from "@/hooks/useAuth";
+import { makeAuthedClient } from "@/lib/api";
+import { supabase } from "@/integrations/supabase/client";
 
-const EXPERTS = [
-  { name: "Dr. Amina Belkacem", role: "Agronomist · Mitidja Univ.", emoji: "👩🏽‍🌾", online: true },
-  { name: "Karim Haddad", role: "Crop Disease Specialist", emoji: "👨🏽‍🔬", online: true },
-  { name: "Dr. Sofia Marin", role: "Soil & Irrigation Expert", emoji: "👩🏼‍🔬", online: false },
-];
+interface Agronomist {
+  user_id: string;
+  display_name: string | null;
+  specialty: string | null;
+}
+
+interface ActiveChat {
+  agronomist: Agronomist;
+  conversationId: string;
+}
 
 const TIPS = [
-  { t: "Detect drought 4 days early", b: "Watch NDVI drop combined with NDWI to spot moisture stress before leaves wilt." },
-  { t: "Disease pattern recognition", b: "Circular yellow patches typically signal early fungal infection — isolate the area fast." },
-  { t: "Best flight time", b: "Fly between 10 AM and 2 PM for optimal multispectral reflectance." },
+  {
+    t: "Detect drought 4 days early",
+    b: "Watch NDVI drop combined with NDWI to spot moisture stress before leaves wilt.",
+  },
+  {
+    t: "Disease pattern recognition",
+    b: "Circular yellow patches typically signal early fungal infection — isolate the area fast.",
+  },
+  {
+    t: "Best flight time",
+    b: "Fly between 10 AM and 2 PM for optimal multispectral reflectance.",
+  },
 ];
 
-export default function Expert() {
-  const [chat, setChat] = useState<typeof EXPERTS[0] | null>(null);
-  const [msg, setMsg] = useState("");
-  const [log, setLog] = useState<{ from: "me" | "exp"; text: string }[]>([
-    { from: "exp", text: "Hi 👋 I just looked at your Zone B data — it really does look like early Septoria. How long has it been like this?" },
-  ]);
+// Deterministic emoji per agronomist based on their id
+function avatarEmoji(id: string) {
+  const emojis = ["👩🏽‍🌾", "👨🏽‍🔬", "👩🏼‍🔬", "🧑🏾‍🌾", "👨🏻‍🔬", "👩🏿‍🌾"];
+  const index = id.charCodeAt(0) % emojis.length;
+  return emojis[index];
+}
 
-  const send = () => {
-    if (!msg.trim()) return;
-    setLog(l => [...l, { from: "me", text: msg }]);
-    setMsg("");
-    setTimeout(() => setLog(l => [...l, { from: "exp", text: "Got it! I'd recommend a targeted fungicide on B1 within 48h. Want me to draft a treatment plan?" }]), 1200);
+export default function Expert() {
+  const { user, session } = useAuth();
+
+  const [agronomists, setAgronomists] = useState<Agronomist[]>([]);
+  const [loadingAgronomists, setLoadingAgronomists] = useState(true);
+
+  const [activeChat, setActiveChat] = useState<ActiveChat | null>(null);
+  const [openingFor, setOpeningFor] = useState<string | null>(null);
+  const [msg, setMsg] = useState("");
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  const { messages, send, connected } = useExpertChat(
+    activeChat?.conversationId ?? null
+  );
+
+  // ── Fetch agronomists from Supabase ──────────────────────────────────────
+  useEffect(() => {
+    async function loadAgronomists() {
+      setLoadingAgronomists(true);
+      try {
+        const { data, error } = await supabase
+          .from("profiles")
+          .select("user_id, display_name, specialty")
+          .in(
+            "user_id",
+            // sub-select agronomist user_ids from user_roles
+            (
+              await supabase
+                .from("user_roles")
+                .select("user_id")
+                .eq("role", "agronomist")
+            ).data?.map((r: { user_id: string }) => r.user_id) ?? []
+          );
+
+        if (error) throw error;
+        setAgronomists(data ?? []);
+      } catch (err) {
+        console.error("Failed to load agronomists", err);
+      } finally {
+        setLoadingAgronomists(false);
+      }
+    }
+
+    loadAgronomists();
+  }, []);
+
+  // ── Auto-scroll ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  // ── Open / reuse conversation ────────────────────────────────────────────
+  const openChat = async (agronomist: Agronomist) => {
+    if (!session?.access_token) return;
+    setOpeningFor(agronomist.user_id);
+    try {
+      const token = session.access_token;
+      const client = await makeAuthedClient(async () => token);
+      const res = await client.post<{ id: string }>("/api/conversations", {
+        agronomist_id: agronomist.user_id,
+        zone: "—",
+        issue: "New question",
+      });
+      setActiveChat({ agronomist, conversationId: res.id });
+    } catch (err) {
+      console.error("Failed to open conversation", err);
+    } finally {
+      setOpeningFor(null);
+    }
   };
 
+  const closeChat = () => {
+    setActiveChat(null);
+    setMsg("");
+  };
+
+  const handleSend = () => {
+    const trimmed = msg.trim();
+    if (!trimmed || !connected) return;
+    send(trimmed);
+    setMsg("");
+  };
+
+  // ── Render ───────────────────────────────────────────────────────────────
   return (
     <div className="space-y-4">
-      <PageHeader title="💬 Ask an Expert" subtitle="Real human agronomists, ready to help" gradient="gradient-expert" />
+      <PageHeader
+        title="💬 Ask an Expert"
+        subtitle="Real human agronomists, ready to help"
+        gradient="gradient-expert"
+      />
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {/* ── Expert list ───────────────────────────────────────────── */}
         <div className="lg:col-span-2 space-y-3">
-          <h3 className="font-display font-semibold">Available Experts</h3>
-          {EXPERTS.map(e => (
-            <div key={e.name} className="bg-card rounded-2xl shadow-soft border border-border/40 p-4 flex items-center gap-4">
-              <div className="h-12 w-12 rounded-full bg-muted flex items-center justify-center text-2xl relative">
-                {e.emoji}
-                <span className={`absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-card ${e.online ? "bg-stress-healthy" : "bg-muted-foreground"}`} />
-              </div>
-              <div className="flex-1">
-                <div className="font-semibold">{e.name}</div>
-                <div className="text-xs text-muted-foreground">{e.role}</div>
-              </div>
-              <button disabled={!e.online} onClick={() => setChat(e)}
-                className="px-4 py-2 rounded-xl bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-40 hover:shadow-glow transition-smooth">
-                Chat
-              </button>
+          <h3 className="font-display font-semibold flex items-center gap-2">
+            <Users className="h-4 w-4" /> Available Experts
+          </h3>
+
+          {/* Loading skeleton */}
+          {loadingAgronomists && (
+            <div className="space-y-3">
+              {[1, 2, 3].map((i) => (
+                <div
+                  key={i}
+                  className="bg-card rounded-2xl border border-border/40 p-4 flex items-center gap-4 animate-pulse"
+                >
+                  <div className="h-12 w-12 rounded-full bg-muted shrink-0" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-3 bg-muted rounded w-40" />
+                    <div className="h-2 bg-muted rounded w-28" />
+                  </div>
+                  <div className="h-8 w-16 bg-muted rounded-xl" />
+                </div>
+              ))}
             </div>
-          ))}
+          )}
+
+          {/* Empty state */}
+          {!loadingAgronomists && agronomists.length === 0 && (
+            <div className="bg-card rounded-2xl border border-border/40 p-8 text-center text-sm text-muted-foreground">
+              No agronomists available right now. Check back soon.
+            </div>
+          )}
+
+          {/* Agronomist cards */}
+          {!loadingAgronomists &&
+            agronomists.map((e) => (
+              <div
+                key={e.user_id}
+                className="bg-card rounded-2xl shadow-soft border border-border/40 p-4 flex items-center gap-4"
+              >
+                <div className="h-12 w-12 rounded-full bg-muted flex items-center justify-center text-2xl relative shrink-0">
+                  {avatarEmoji(e.user_id)}
+                  {/* All fetched agronomists are considered online */}
+                  <span className="absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-card bg-stress-healthy" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="font-semibold">
+                    {e.display_name ?? "Agronomist"}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {e.specialty ?? "Agricultural Expert"}
+                  </div>
+                </div>
+                <button
+                  disabled={openingFor === e.user_id}
+                  onClick={() => openChat(e)}
+                  className="px-4 py-2 rounded-xl bg-primary text-primary-foreground text-sm font-semibold disabled:opacity-40 hover:shadow-glow transition-smooth flex items-center gap-2 shrink-0"
+                >
+                  {openingFor === e.user_id ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : null}
+                  {openingFor === e.user_id ? "Opening…" : "Chat"}
+                </button>
+              </div>
+            ))}
         </div>
+
+        {/* ── Tips ──────────────────────────────────────────────────── */}
         <div className="space-y-3">
           <h3 className="font-display font-semibold">🌱 Community Tips</h3>
-          {TIPS.map(t => (
-            <div key={t.t} className="bg-card rounded-2xl shadow-soft border border-border/40 p-4">
+          {TIPS.map((t) => (
+            <div
+              key={t.t}
+              className="bg-card rounded-2xl shadow-soft border border-border/40 p-4"
+            >
               <div className="font-semibold text-sm">{t.t}</div>
               <div className="text-xs text-muted-foreground mt-1">{t.b}</div>
             </div>
           ))}
         </div>
       </div>
-      {chat && (
-        <div className="fixed inset-0 z-[1000] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setChat(null)}>
-          <div className="bg-card rounded-2xl w-full max-w-md h-[560px] flex flex-col shadow-card animate-slide-in-right" onClick={e => e.stopPropagation()}>
+
+      {/* ── Chat modal ────────────────────────────────────────────────── */}
+      {activeChat && (
+        <div
+          className="fixed inset-0 z-[1000] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={closeChat}
+        >
+          <div
+            className="bg-card rounded-2xl w-full max-w-md h-[560px] flex flex-col shadow-card animate-slide-in-right"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
             <div className="p-4 border-b border-border/40 flex items-center gap-3">
-              <div className="h-10 w-10 rounded-full bg-muted flex items-center justify-center text-xl">{chat.emoji}</div>
-              <div className="flex-1">
-                <div className="font-semibold text-sm">{chat.name}</div>
-                <div className="text-[10px] text-stress-healthy">● online</div>
+              <div className="h-10 w-10 rounded-full bg-muted flex items-center justify-center text-xl shrink-0">
+                {avatarEmoji(activeChat.agronomist.user_id)}
               </div>
-              <button onClick={() => setChat(null)} className="p-2 rounded-lg hover:bg-muted"><X className="h-4 w-4" /></button>
+              <div className="flex-1 min-w-0">
+                <div className="font-semibold text-sm truncate">
+                  {activeChat.agronomist.display_name ?? "Agronomist"}
+                </div>
+                <div className="flex items-center gap-1.5 text-[10px]">
+                  {connected ? (
+                    <>
+                      <span className="h-1.5 w-1.5 rounded-full bg-stress-healthy animate-pulse-live" />
+                      <span className="text-stress-healthy">connected</span>
+                    </>
+                  ) : (
+                    <>
+                      <WifiOff className="h-3 w-3 text-muted-foreground" />
+                      <span className="text-muted-foreground">
+                        reconnecting…
+                      </span>
+                    </>
+                  )}
+                </div>
+              </div>
+              <button
+                onClick={closeChat}
+                className="p-2 rounded-lg hover:bg-muted"
+              >
+                <X className="h-4 w-4" />
+              </button>
             </div>
+
+            {/* Messages */}
             <div className="flex-1 overflow-y-auto p-4 space-y-2">
-              {log.map((m, i) => (
-                <div key={i} className={`max-w-[80%] px-3 py-2 rounded-2xl text-sm ${m.from === "me" ? "ml-auto bg-primary text-primary-foreground" : "bg-muted text-foreground"}`}>{m.text}</div>
-              ))}
+              {messages.length === 0 && (
+                <div className="h-full flex items-center justify-center text-xs text-muted-foreground text-center px-6">
+                  Send a message to start the conversation. The agronomist will
+                  be notified instantly.
+                </div>
+              )}
+              {messages.map((m) => {
+                const isMe = m.sender_id === user?.id;
+                return (
+                  <div
+                    key={m.id}
+                    className={`flex flex-col gap-0.5 ${
+                      isMe ? "items-end" : "items-start"
+                    }`}
+                  >
+                    <div
+                      className={`max-w-[80%] px-3 py-2 rounded-2xl text-sm ${
+                        isMe
+                          ? "bg-primary text-primary-foreground rounded-br-sm"
+                          : "bg-muted text-foreground rounded-bl-sm"
+                      }`}
+                    >
+                      {m.body}
+                    </div>
+                    <span className="text-[10px] text-muted-foreground px-1">
+                      {new Date(m.created_at).toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                    </span>
+                  </div>
+                );
+              })}
+              <div ref={bottomRef} />
             </div>
+
+            {/* Input */}
             <div className="p-3 border-t border-border/40 flex gap-2">
-              <input value={msg} onChange={e => setMsg(e.target.value)} onKeyDown={e => e.key === "Enter" && send()}
-                placeholder="Type a message..." className="flex-1 bg-muted rounded-xl px-3 py-2 text-sm outline-none" />
-              <button onClick={send} className="p-2 rounded-xl bg-primary text-primary-foreground"><Send className="h-4 w-4" /></button>
+              <input
+                value={msg}
+                onChange={(e) => setMsg(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleSend()}
+                placeholder={connected ? "Type a message…" : "Reconnecting…"}
+                disabled={!connected}
+                className="flex-1 bg-muted rounded-xl px-3 py-2 text-sm outline-none disabled:opacity-50"
+              />
+              <button
+                onClick={handleSend}
+                disabled={!msg.trim() || !connected}
+                className="p-2 rounded-xl bg-primary text-primary-foreground disabled:opacity-40 transition-smooth"
+              >
+                <Send className="h-4 w-4" />
+              </button>
             </div>
           </div>
         </div>

@@ -26,10 +26,8 @@ type ImageRow = {
 type SegResult = {
   image_id: string;
   mask_url: string;
-  label_counts?: Record<string, number>;  // optional — not always stored
   stress_class?: string;
-  health_score?: number;
-  health_percentage?: number;
+  confidence?: number;   // percentage 0.0–100.0, e.g. 87.5
   cached?: boolean;
 };
 
@@ -44,24 +42,6 @@ type SelectedImage = ImageRow & {
   flightLabel: string;
   maskUrl?: string;
 };
-
-// ── Label config ────────────────────────────────────────────────────────────
-
-const LABEL_META: Record<string, { name: string; colour: string }> = {
-  "0": { name: "Vegetation", colour: "#00802b" },
-  "1": { name: "Soil",       colour: "#c2b280" },
-  "2": { name: "Water",      colour: "#0055ff" },
-  "3": { name: "Crop",       colour: "#e6d800" },
-  "4": { name: "Weed",       colour: "#800080" },
-  "5": { name: "Stress",     colour: "#ff8c00" },
-};
-
-function labelName(idx: string) {
-  return LABEL_META[idx]?.name ?? `Class ${idx}`;
-}
-function labelColour(idx: string) {
-  return LABEL_META[idx]?.colour ?? "#888";
-}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -95,61 +75,27 @@ async function resolveSignedUrls(imgs: ImageRow[]): Promise<ImageRow[]> {
   return imgs.map((img) => ({ ...img, publicUrl: urlMap[img.storage_path] }));
 }
 
-// ── LabelBar ────────────────────────────────────────────────────────────────
-
-function LabelBar({ counts }: { counts?: Record<string, number> }) {
-  // Guard: counts may be undefined/null when loaded from cache
-  if (!counts) return null;
-  const entries = Object.entries(counts);
-  if (entries.length === 0) return null;
-  const total = entries.reduce((a, [, b]) => a + b, 0);
-  if (total === 0) return null;
-  const sorted = entries.sort(([, a], [, b]) => b - a);
-  return (
-    <div className="mt-2 space-y-1">
-      {/* Stacked bar */}
-      <div className="flex h-2 w-full rounded-full overflow-hidden">
-        {sorted.map(([idx, count]) => (
-          <div
-            key={idx}
-            style={{ width: `${(count / total) * 100}%`, backgroundColor: labelColour(idx) }}
-            title={`${labelName(idx)}: ${((count / total) * 100).toFixed(1)}%`}
-          />
-        ))}
-      </div>
-      {/* Legend */}
-      <div className="flex flex-wrap gap-x-3 gap-y-0.5">
-        {sorted.slice(0, 5).map(([idx, count]) => (
-          <div key={idx} className="flex items-center gap-1 text-[10px] text-muted-foreground">
-            <span
-              className="inline-block w-2 h-2 rounded-sm shrink-0"
-              style={{ backgroundColor: labelColour(idx) }}
-            />
-            {labelName(idx)} {((count / total) * 100).toFixed(1)}%
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 // ── HealthBadge ─────────────────────────────────────────────────────────────
 
 function HealthBadge({ result }: { result: SegResult }) {
-  const pct   = result.health_percentage ?? result.health_score;
-  const cls   = result.stress_class;
-  if (pct == null && !cls) return null;
+  const cls        = result.stress_class;
+  const confidence = result.confidence;
+  if (!cls) return null;
 
   const colour =
-    cls === "healthy"  ? "text-emerald-700 bg-emerald-50 border-emerald-200" :
-    cls === "stressed" ? "text-red-700 bg-red-50 border-red-200" :
-                         "text-amber-700 bg-amber-50 border-amber-200";
+    cls === "healthy"
+      ? "text-emerald-700 bg-emerald-50 border-emerald-200"
+      : "text-red-700 bg-red-50 border-red-200";
 
   return (
-    <div className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full border ${colour}`}>
+    <div
+      className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full border ${colour}`}
+    >
       {cls === "healthy" ? "🌱" : "⚠️"}
-      {cls && <span className="capitalize">{cls}</span>}
-      {pct != null && <span>{pct.toFixed(1)}%</span>}
+      <span className="capitalize">{cls}</span>
+      {confidence != null && (
+        <span className="opacity-70">· {confidence} conf.</span>
+      )}
     </div>
   );
 }
@@ -288,6 +234,7 @@ function ImageGrid({
 
   return (
     <div className="space-y-4">
+      {/* Masonry grid */}
       <div className="columns-1 sm:columns-2 lg:columns-3 xl:columns-4 gap-3 space-y-3">
         {images.map((img, i) => {
           const seg = maskByImageId[img.id];
@@ -329,25 +276,19 @@ function ImageGrid({
         })}
       </div>
 
-      {/* Per-image breakdown when segmentation is done */}
+      {/* Per-image health + confidence summary */}
       {segResults && segResults.length > 0 && (
-        <div className="space-y-3 border-t border-border/30 pt-3">
-          <p className="text-xs font-medium text-muted-foreground">Segmentation breakdown</p>
+        <div className="space-y-2 border-t border-border/30 pt-3">
+          <p className="text-xs font-medium text-muted-foreground">Segmentation results</p>
           {images.map((img) => {
             const seg = maskByImageId[img.id];
             if (!seg) return null;
             return (
-              <div key={img.id} className="space-y-1">
-                <div className="flex items-center justify-between">
-                  <p className="text-[10px] text-muted-foreground truncate max-w-[60%]">
-                    {img.storage_path.split("/").pop()}
-                  </p>
-                  <HealthBadge result={seg} />
-                </div>
-                {/* Only render LabelBar if label_counts exists and is non-empty */}
-                {seg.label_counts && Object.keys(seg.label_counts).length > 0 && (
-                  <LabelBar counts={seg.label_counts} />
-                )}
+              <div key={img.id} className="flex items-center justify-between">
+                <p className="text-[10px] text-muted-foreground truncate max-w-[60%]">
+                  {img.storage_path.split("/").pop()}
+                </p>
+                <HealthBadge result={seg} />
               </div>
             );
           })}
@@ -360,7 +301,6 @@ function ImageGrid({
 // ── Lightbox ───────────────────────────────────────────────────────────────
 
 function Lightbox({ image, onClose }: { image: SelectedImage; onClose: () => void }) {
-  // Only show mask if it's a real URL (not local:// fallback)
   const hasMask = Boolean(image.maskUrl) && !image.maskUrl?.startsWith("local://");
 
   return (
@@ -387,7 +327,6 @@ function Lightbox({ image, onClose }: { image: SelectedImage; onClose: () => voi
         <div className="p-4">
           {hasMask ? (
             <div className="grid grid-cols-2 gap-3">
-              {/* Original */}
               <div className="space-y-1.5">
                 <p className="text-xs font-medium text-muted-foreground text-center">Original</p>
                 {image.publicUrl ? (
@@ -402,7 +341,6 @@ function Lightbox({ image, onClose }: { image: SelectedImage; onClose: () => voi
                   </div>
                 )}
               </div>
-              {/* Segmentation mask */}
               <div className="space-y-1.5">
                 <p className="text-xs font-medium text-muted-foreground text-center flex items-center justify-center gap-1">
                   <Layers className="h-3 w-3" /> Segmentation Mask
@@ -499,7 +437,7 @@ export default function Gallery() {
         setFlights(flightsData);
         setImages(withUrls);
 
-        // Pre-load any existing segmentation results — never throws, just skips on error
+        // Pre-load any existing segmentation results
         const segInit: Record<string, SegState> = {};
         await Promise.allSettled(
           flightsData.map(async (fl) => {
@@ -508,15 +446,12 @@ export default function Gallery() {
               if (!res.ok) return;
               const json = await res.json();
               const results: SegResult[] = (json.results ?? []).map((r: any) => ({
-                image_id:         r.image_id,
-                mask_url:         r.mask_url ?? "",
-                label_counts:     r.label_counts ?? undefined,
-                stress_class:     r.stress_class ?? undefined,
-                health_score:     r.health_score ?? undefined,
-                health_percentage: r.health_percentage ?? undefined,
-                cached:           true,
+                image_id:    r.image_id,
+                mask_url:    r.mask_url ?? "",
+                stress_class: r.stress_class ?? undefined,
+                confidence:  r.confidence ?? undefined,
+                cached:      true,
               }));
-              // Only mark as done if there are real results with valid mask URLs
               const valid = results.filter(
                 (r) => r.mask_url && !r.mask_url.startsWith("local://")
               );
@@ -524,7 +459,7 @@ export default function Gallery() {
                 segInit[fl.id] = { status: "done", results: valid };
               }
             } catch {
-              // silently ignore — flight just shows "Run Segmentation" button
+              // silently ignore
             }
           })
         );
@@ -555,13 +490,11 @@ export default function Gallery() {
       }
       const json = await res.json();
       const results: SegResult[] = (json.results ?? []).map((r: any) => ({
-        image_id:          r.image_id,
-        mask_url:          r.mask_url ?? "",
-        label_counts:      r.label_counts ?? undefined,
-        stress_class:      r.stress_class ?? undefined,
-        health_score:      r.health_score ?? undefined,
-        health_percentage: r.health_percentage ?? undefined,
-        cached:            r.cached ?? false,
+        image_id:    r.image_id,
+        mask_url:    r.mask_url ?? "",
+        stress_class: r.stress_class ?? undefined,
+        confidence:  r.confidence ?? undefined,
+        cached:      r.cached ?? false,
       }));
       setSegStates((prev) => ({
         ...prev,

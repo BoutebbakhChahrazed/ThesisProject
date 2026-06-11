@@ -19,7 +19,13 @@ async def dashboard_feed(websocket: WebSocket):
     user = await verify_websocket_token(websocket)
     if not user:
         return
-    await manager.connect(websocket)
+    # Register websocket under authenticated user_id so send_to_user() works
+    user_id = user.get("sub") or user.get("id")
+    if not user_id:
+        logger.warning("WS dashboard: missing user id in token payload")
+        return
+
+    await manager.connect(websocket, user_id=user_id)
     try:
         while True:
             await websocket.receive_text()

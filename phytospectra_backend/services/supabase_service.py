@@ -353,3 +353,46 @@ async def get_fields(user_id: str) -> list:
             logger.warning(f"get_fields failed select={select_cols!r} order={order_col!r}: {e}")
 
     raise RuntimeError(f"Could not load fields from Supabase: {last_error}")
+
+async def get_conversation(conversation_id: str, user_id: str):
+    client = get_supabase()
+    
+    # Log what we're searching for
+    logger.info(f"[get_conversation] looking for conv={conversation_id} user={user_id}")
+    
+    res = client.table("conversations").select("*").eq("id", conversation_id).execute()
+    logger.info(f"[get_conversation] raw result (no user filter): {res.data}")
+    
+    if not res.data:
+        return None
+    
+    row = res.data[0]
+    if row["farmer_id"] == user_id or row["agronomist_id"] == user_id:
+        return row
+    
+    logger.warning(f"[get_conversation] user {user_id} not a participant. farmer={row['farmer_id']} agro={row['agronomist_id']}")
+    return None
+
+async def get_messages(conversation_id: str) -> list:
+    client = get_supabase()
+    res = client.table("chat_messages") \
+        .select("*") \
+        .eq("conversation_id", conversation_id) \
+        .order("created_at") \
+        .execute()
+    return res.data or []
+
+async def save_chat_message(payload: dict) -> dict:
+    client = get_supabase()
+    res = client.table("chat_messages").insert(payload).execute()
+    return res.data[0]
+
+async def get_open_conversations() -> list:
+    client = get_supabase()
+    res = client.table("conversations") \
+        .select("*, profiles(display_name, farm_name)") \
+        .eq("status", "open") \
+        .order("created_at", desc=True) \
+        .execute()
+    return res.data or []
+

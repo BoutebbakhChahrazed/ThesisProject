@@ -4,8 +4,34 @@ import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { Leaf, Sprout, Microscope } from "lucide-react";
 import { toast } from "sonner";
+import { getBackendBaseUrl } from "@/lib/backend";
 
 type Role = "farmer" | "agronomist";
+
+async function pushAgronomistLocation(token: string) {
+  if (!navigator.geolocation) return;
+  navigator.geolocation.getCurrentPosition(
+    async (pos) => {
+      try {
+        await fetch(`${getBackendBaseUrl()}/api/profile/location`, {
+          method: "PATCH",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            lat: pos.coords.latitude,
+            lng: pos.coords.longitude,
+          }),
+        });
+      } catch (err) {
+        console.warn("[location] Failed to push on signup:", err);
+      }
+    },
+    (err) => console.warn("[location] Geolocation error:", err.message),
+    { enableHighAccuracy: true, timeout: 10_000 }
+  );
+}
 
 export default function Auth() {
   const { user, role, loading } = useAuth();
@@ -28,7 +54,7 @@ export default function Auth() {
     setSubmitting(true);
     try {
       if (mode === "signup") {
-        const { error } = await supabase.auth.signUp({
+        const { data, error } = await supabase.auth.signUp({
           email, password,
           options: {
             emailRedirectTo: `${window.location.origin}/`,
@@ -41,13 +67,27 @@ export default function Auth() {
           },
         });
         if (error) throw error;
+
+        // Push location immediately on agronomist account creation
+        if (selectedRole === "agronomist" && data.session?.access_token) {
+          await pushAgronomistLocation(data.session.access_token);
+        }
+
         toast.success("Welcome aboard! 🌱");
         navigate(selectedRole === "agronomist" ? "/expert-desk" : "/live");
       } else {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        const { data, error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
+
+        // Refresh location on every agronomist login
+        const userRole =
+          data.user?.user_metadata?.role ||
+          data.user?.app_metadata?.role;
+        if (userRole === "agronomist" && data.session?.access_token) {
+          await pushAgronomistLocation(data.session.access_token);
+        }
+
         toast.success("Welcome back!");
-        // Don't force landing. Let ProtectedShell redirect based on role after AuthProvider loads metadata.
         navigate("/live", { replace: true });
       }
     } catch (err) {
@@ -125,6 +165,12 @@ export default function Auth() {
             {submitting ? "Please wait..." : mode === "signin" ? "Sign in" : "Create account"}
           </button>
         </form>
+
+        {mode === "signup" && selectedRole === "agronomist" && (
+          <p className="text-center text-[11px] text-muted-foreground mt-3">
+            📍 Your location will be used to match you with nearby stressed fields
+          </p>
+        )}
 
         <p className="text-center text-xs text-muted-foreground mt-5">
           🌱 Growing smarter, together

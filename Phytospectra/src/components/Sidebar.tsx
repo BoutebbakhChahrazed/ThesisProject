@@ -2,22 +2,23 @@ import { NavLink } from "react-router-dom";
 import { Map, BarChart3, Image, MessageCircle, Settings, Leaf, LogOut, Inbox, Plus, Bell } from "lucide-react";
 import logo from "@/assets/phytospectra-logo.png";
 import { useAuth } from "@/hooks/useAuth";
-import { useWebSocket } from "@/hooks/useWebSocket";
 
 const farmerLinks = [
-  { to: "/analytics", label: "Field Analytics",  icon: BarChart3,     emoji: "📊" },
-  { to: "/fields",    label: "Fields",            icon: Leaf,          emoji: "🌿" },
-  { to: "/drones",    label: "Drones",            icon: Map,           emoji: "📡" },
-  { to: "/flights",   label: "Flights",           icon: Map,           emoji: "🛰️" },
-  { to: "/gallery",   label: "Image Gallery",     icon: Image,         emoji: "🖼️" },
-  { to: "/expert",    label: "Ask an Expert",     icon: MessageCircle, emoji: "💬", dot: true },
-  { to: "/chat",      label: "AI Assistant",      icon: MessageCircle, emoji: "🤖" },
-  { to: "/settings",  label: "Settings",          icon: Settings,      emoji: "⚙️" },
+  { to: "/analytics",  label: "Field Analytics", icon: BarChart3,     emoji: "📊" },
+  { to: "/fields",     label: "Fields",           icon: Leaf,          emoji: "🌿" },
+  { to: "/drones",     label: "Drones",           icon: Map,           emoji: "📡" },
+  { to: "/flights",    label: "Flights",          icon: Map,           emoji: "🛰️" },
+  { to: "/gallery",    label: "Image Gallery",    icon: Image,         emoji: "🖼️" },
+  { to: "/expert",     label: "Ask an Expert",    icon: MessageCircle, emoji: "💬", dot: true },
+  { to: "/alerts",     label: "Stress Alerts",    icon: Bell,          emoji: "⚠️" },
+  { to: "/chat",       label: "AI Assistant",     icon: MessageCircle, emoji: "🤖" },
+  { to: "/settings",   label: "Settings",         icon: Settings,      emoji: "⚙️" },
 ];
 
 const agronomistLinks = [
   { to: "/expert-desk", label: "Farmer Requests", icon: Inbox,         emoji: "📥", dot: true },
-  { to: "/chat",        label: "AI Assistant",    icon: MessageCircle, emoji: "🤖" },
+  { to: "/alerts",      label: "Stress Alerts",   icon: Bell,          emoji: "⚠️" },
+ 
   { to: "/settings",    label: "Settings",        icon: Settings,      emoji: "⚙️" },
 ];
 
@@ -25,11 +26,12 @@ interface SidebarProps {
   wsUrl: string;
   wsConnected: boolean;
   dbConnected: boolean;
+  unreadAlerts: number;
+  clearUnread: () => void;
 }
 
-export function Sidebar({ wsUrl, wsConnected, dbConnected }: SidebarProps) {
+export function Sidebar({ wsUrl, wsConnected, dbConnected, unreadAlerts, clearUnread }: SidebarProps) {
   const { role, profile, signOut } = useAuth();
-  const { unreadAlerts, clearUnread } = useWebSocket(wsUrl || null);
 
   const links = role === "agronomist" ? agronomistLinks : farmerLinks;
 
@@ -62,7 +64,7 @@ export function Sidebar({ wsUrl, wsConnected, dbConnected }: SidebarProps) {
           </div>
         </div>
 
-        {/* Global alert bell — visible on all roles */}
+        {/* Global alert bell badge */}
         {unreadAlerts > 0 && (
           <button
             onClick={clearUnread}
@@ -81,11 +83,12 @@ export function Sidebar({ wsUrl, wsConnected, dbConnected }: SidebarProps) {
       <nav className="flex-1 px-3 space-y-1 mt-2 relative z-10">
         {links.map(({ to, label, emoji, dot }) => {
           const isAlertLink = to === alertPath;
+          const isAlertsPage = to === "/alerts";
           return (
             <NavLink
               key={to}
               to={to}
-              onClick={() => isAlertLink && clearUnread()}
+              onClick={() => (isAlertLink || isAlertsPage) && clearUnread()}
               className={({ isActive }) =>
                 `flex items-center justify-between gap-3 px-4 py-3 rounded-xl transition-smooth text-sm font-medium ${
                   isActive
@@ -99,7 +102,7 @@ export function Sidebar({ wsUrl, wsConnected, dbConnected }: SidebarProps) {
                 {label}
               </span>
 
-              {isAlertLink && unreadAlerts > 0 ? (
+              {(isAlertLink || isAlertsPage) && unreadAlerts > 0 ? (
                 <span className="h-5 min-w-5 px-1 rounded-full bg-stress-severe text-white text-[10px] font-bold flex items-center justify-center animate-pulse-live">
                   {unreadAlerts > 9 ? "9+" : unreadAlerts}
                 </span>
